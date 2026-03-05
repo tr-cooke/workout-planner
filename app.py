@@ -463,6 +463,7 @@ def build_plan_week_modal(show_daily_times: bool = False, preserved_unavailable:
         {
             "type": "input",
             "block_id": "preferred_times",
+            "dispatch_action": True,
             "element": {
                 "type": "static_select",
                 "action_id": "time",
