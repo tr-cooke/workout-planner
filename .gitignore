@@ -1,0 +1,17 @@
+# Environment - NEVER commit this!
+.env
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
