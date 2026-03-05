@@ -1,0 +1,65 @@
+{
+    "display_information": {
+      "name": "Workout Planner",
+      "description": "Plan your weekly workouts across Ballard fitness studios",
+      "background_color": "#1a5f7a",
+      "long_description": "A workout planning assistant for the Busterville Montana family! Plan your weekly fitness schedule across:\n\n• Ballard Public Pool 🏊\n• barre3 Ballard 🩰\n• solidcore Ballard 💪\n• Cycle Sanctuary 🚴\n• Greenlake Running Group 🏃\n• Solo runs 👟\n\nFeatures:\n- Weekly workout planning to hit your 5-workout goal\n- Booking reminders for each studio's booking window\n- Seattle weather integration for outdoor runs\n- Google Calendar integration to check availability"
+    },
+    "features": {
+      "app_home": {
+        "home_tab_enabled": true,
+        "messages_tab_enabled": true,
+        "messages_tab_read_only_enabled": false
+      },
+      "bot_user": {
+        "display_name": "Workout Planner",
+        "always_online": true
+      },
+      "slash_commands": [
+        {
+          "command": "/workout",
+          "description": "Manage your workout schedule",
+          "usage_hint": "[plan|schedules|weather|week|help]",
+          "should_escape": false
+        }
+      ]
+    },
+    "oauth_config": {
+      "scopes": {
+        "bot": [
+          "app_mentions:read",
+          "channels:history",
+          "channels:read",
+          "chat:write",
+          "commands",
+          "groups:history",
+          "groups:read",
+          "im:history",
+          "im:read",
+          "im:write",
+          "mpim:history",
+          "mpim:read",
+          "users:read"
+        ]
+      }
+    },
+    "settings": {
+      "event_subscriptions": {
+        "bot_events": [
+          "app_home_opened",
+          "app_mention",
+          "message.channels",
+          "message.groups",
+          "message.im",
+          "message.mpim"
+        ]
+      },
+      "interactivity": {
+        "is_enabled": true
+      },
+      "org_deploy_enabled": false,
+      "socket_mode_enabled": true,
+      "token_rotation_enabled": false
+    }
+  }
+  

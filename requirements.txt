@@ -1,0 +1,22 @@
+# Slack Bolt Framework
+slack-bolt>=1.18.0
+slack-sdk>=3.21.0
+
+# Async support
+aiohttp>=3.8.0
+
+# Web scraping for schedule parsing
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# Timezone handling
+pytz>=2023.3
+
+# Environment variables
+python-dotenv>=1.0.0
+
+# HTTP requests
+requests>=2.31.0
+
+# Date parsing
+python-dateutil>=2.8.2
