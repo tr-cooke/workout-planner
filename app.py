@@ -37,6 +37,9 @@ import pytz
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
+# Anthropic API for conversational features
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+
 # Initialize the Slack app
 app = AsyncApp(
     token=os.environ.get("SLACK_BOT_TOKEN"),
@@ -848,54 +851,178 @@ Or just open the App Home tab to see your dashboard!
         await client.chat_postMessage(channel=user_id, text=help_text)
 
 
-# Message handlers
-@app.message("(?i)(workout|plan|schedule|class|gym)")
-async def handle_workout_message(message, say, client: AsyncWebClient):
-    """Respond to messages mentioning workouts."""
-    user_id = message["user"]
-    text = message["text"].lower()
+# Message handlers - Claude-powered conversational interface
+@app.event("message")
+async def handle_message(message, say, client: AsyncWebClient):
+    """Handle all direct messages with Claude-powered conversation."""
+    # Ignore bot messages and message subtypes (edits, etc.)
+    if message.get("bot_id") or message.get("subtype"):
+        return
     
-    if "solidcore" in text:
-        await say(
-            f"💪 *solidcore Ballard*\n"
-            f"📍 2425 NW Market St\n"
-            f"🔗 <{STUDIOS['solidcore']['url']}|View Schedule>\n"
-            f"📅 Booking opens on the 1st of each month!"
+    user_id = message["user"]
+    text = message.get("text", "")
+    channel = message.get("channel", "")
+    
+    # Only respond to DMs (channel starts with D) or app mentions
+    if not channel.startswith("D"):
+        return
+    
+    # Get user's current schedule
+    user_workouts = user_data.get(user_id, {}).get("workouts", {})
+    
+    # Use Claude to understand and respond
+    response = await chat_with_claude(text, user_workouts, user_id)
+    
+    # Check if Claude made changes to the schedule
+    if response.get("schedule_updated"):
+        # Update the user's workouts
+        if user_id not in user_data:
+            user_data[user_id] = {"workouts": {}}
+        user_data[user_id]["workouts"] = response["new_schedule"]
+        
+        # Update home view
+        await client.views_publish(
+            user_id=user_id,
+            view=build_home_view(user_id)
         )
-    elif "barre" in text or "barre3" in text:
-        await say(
-            f"🩰 *barre3 Ballard*\n"
-            f"📍 5333 Ballard Ave NW\n"
-            f"🔗 <{STUDIOS['barre3']['url']}|View Schedule>\n"
-            f"📅 Classes open 1 week in advance"
-        )
-    elif "cycle" in text or "cycling" in text:
-        await say(
-            f"🚴 *Cycle Sanctuary*\n"
-            f"📍 2420 NW Market St\n"
-            f"🔗 <{STUDIOS['cycle']['url']}|View Schedule>\n"
-            f"📅 Classes open 1 week in advance"
-        )
-    elif "swim" in text or "pool" in text:
-        await say(
-            f"🏊 *Ballard Public Pool*\n"
-            f"📍 1471 NW 67th St\n"
-            f"🔗 <{STUDIOS['pool']['url']}|View Schedule>\n"
-        )
-    elif "run" in text or "greenlake" in text:
-        await say(
-            f"🏃 *Running Options:*\n"
-            f"• *Greenlake Running Group* - Saturdays at Green Lake\n"
-            f"  🔗 <{STUDIOS['greenlake']['url']}|Meetup Page>\n"
-            f"• *Solo runs* - 3-5 miles on a weekday"
-        )
-    else:
-        await say(
-            "Would you like help planning your workouts? Try:\n"
-            "• `/workout plan` - Plan your week\n"
-            "• `/workout schedules` - View studio schedules\n"
-            "• Or check the App Home tab!"
-        )
+    
+    await say(response["message"])
+
+
+async def chat_with_claude(user_message: str, current_schedule: dict, user_id: str) -> dict:
+    """Use Claude to understand user intent and manage schedule."""
+    
+    if not ANTHROPIC_API_KEY:
+        return {
+            "message": "Chat feature not configured. Please add ANTHROPIC_API_KEY to enable conversational planning.",
+            "schedule_updated": False
+        }
+    
+    # Get current week info
+    week_dates = get_week_dates(planning_mode=True)
+    today = datetime.now(SEATTLE_TZ)
+    
+    # Format current schedule for Claude
+    schedule_text = ""
+    for date in week_dates:
+        day_key = date.strftime("%Y-%m-%d")
+        day_name = date.strftime("%A, %m/%d")
+        workout = current_schedule.get(day_key)
+        if workout:
+            studio = workout["studio"]
+            time = workout["time"]
+            name = STUDIOS.get(studio, {}).get("name", studio)
+            schedule_text += f"- {day_name} ({day_key}): {name} at {time}\n"
+        else:
+            schedule_text += f"- {day_name} ({day_key}): Rest day\n"
+    
+    # Studios info for Claude
+    studios_info = """
+Available studios and their keys:
+- barre3: barre3 Ballard (classes at 6:00, 9:30, 12:00, 17:45)
+- solidcore: solidcore Ballard (classes at 6:00, 7:00, 9:30, 12:00, 17:30, 18:30)
+- cycle: Cycle Sanctuary (classes at 6:00, 9:00, 12:00, 17:30)
+- pool: Ballard Public Pool / lap swim (5:30, 9:00, 12:00, 18:00)
+- greenlake: Greenlake Running Group (Saturday mornings, 7:00 or 9:00)
+- solo_run: Solo Run (any time, 3-5 miles)
+"""
+    
+    system_prompt = f"""You are a helpful workout planning assistant for a family fitness planner. Today is {today.strftime("%A, %B %d, %Y")}.
+
+The user's current workout schedule for the week of {week_dates[0].strftime("%B %d")} - {week_dates[6].strftime("%B %d")}:
+{schedule_text}
+
+{studios_info}
+
+Weekly goals: 5 workouts total (1 barre3, 1 solidcore, 1 Cycle Sanctuary, 1-2 runs, optional swim)
+
+Your job:
+1. Understand what the user wants to do with their schedule
+2. If they want to make changes (move, add, remove, swap workouts), output a JSON block with the changes
+3. Be friendly and conversational
+
+IMPORTANT: If making schedule changes, you MUST include a JSON block in your response like this:
+```json
+{{"action": "update", "changes": {{"YYYY-MM-DD": {{"studio": "studio_key", "time": "HH:MM", "notes": "optional"}}, "YYYY-MM-DD": null}}}}
+```
+- Use null to remove a workout from a day
+- Use the studio keys exactly: barre3, solidcore, cycle, pool, greenlake, solo_run
+- Use 24-hour time format (e.g., "13:00" for 1 PM, "17:30" for 5:30 PM)
+
+If NOT making changes (just answering questions), don't include any JSON block.
+
+Keep responses concise and friendly."""
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json"
+                },
+                json={
+                    "model": "claude-sonnet-4-20250514",
+                    "max_tokens": 1024,
+                    "system": system_prompt,
+                    "messages": [{"role": "user", "content": user_message}]
+                }
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logger.error(f"Claude API error: {response.status} - {error_text}")
+                    return {
+                        "message": "Sorry, I had trouble understanding that. Try `/workout plan` to use the planning wizard.",
+                        "schedule_updated": False
+                    }
+                
+                data = await response.json()
+                assistant_message = data["content"][0]["text"]
+                
+                # Check if there's a JSON block with schedule changes
+                schedule_updated = False
+                new_schedule = current_schedule.copy()
+                
+                json_match = re.search(r'```json\s*(\{.*?\})\s*```', assistant_message, re.DOTALL)
+                if json_match:
+                    try:
+                        changes_data = json.loads(json_match.group(1))
+                        if changes_data.get("action") == "update" and "changes" in changes_data:
+                            for day_key, workout in changes_data["changes"].items():
+                                if workout is None:
+                                    # Remove workout
+                                    new_schedule.pop(day_key, None)
+                                else:
+                                    # Add/update workout
+                                    new_schedule[day_key] = {
+                                        "studio": workout.get("studio", ""),
+                                        "time": workout.get("time", "09:00"),
+                                        "notes": workout.get("notes", "")
+                                    }
+                            schedule_updated = True
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Failed to parse schedule changes: {e}")
+                
+                # Clean up the message (remove JSON block from display)
+                clean_message = re.sub(r'```json\s*\{.*?\}\s*```', '', assistant_message, flags=re.DOTALL).strip()
+                
+                # If schedule was updated, add confirmation
+                if schedule_updated:
+                    clean_message += "\n\n✅ _Schedule updated! Check your App Home to see the changes._"
+                
+                return {
+                    "message": clean_message,
+                    "schedule_updated": schedule_updated,
+                    "new_schedule": new_schedule if schedule_updated else None
+                }
+                
+    except Exception as e:
+        logger.error(f"Error calling Claude: {e}")
+        return {
+            "message": "Sorry, I had trouble processing that. Try `/workout plan` to use the planning wizard.",
+            "schedule_updated": False
+        }
 
 
 # Helper functions
