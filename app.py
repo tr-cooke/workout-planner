@@ -1,6 +1,3 @@
-from dotenv import load_dotenv
-load_dotenv()
-
 """
 Busterville Montana Family Workout Planner Slack App
 =====================================================
@@ -20,8 +17,8 @@ Booking Windows:
 - barre3: Opens 1 week out
 """
 
-
 import os
+import re
 import json
 import logging
 from datetime import datetime, timedelta
@@ -110,13 +107,31 @@ WEEKLY_GOALS = {
 user_data = {}
 
 
-def get_week_dates(start_date: Optional[datetime] = None) -> list:
-    """Get dates for the current or specified week (Monday-Sunday)."""
+def get_week_dates(start_date: Optional[datetime] = None, planning_mode: bool = False) -> list:
+    """Get dates for a week (Monday-Sunday).
+    
+    Args:
+        start_date: Optional start date
+        planning_mode: If True, returns the upcoming planning week (next Monday, or today if Monday)
+    """
     if start_date is None:
         start_date = datetime.now(SEATTLE_TZ)
     
-    # Find Monday of the week
-    monday = start_date - timedelta(days=start_date.weekday())
+    if planning_mode:
+        # For planning: start from next Monday, unless today is Monday
+        days_until_monday = (7 - start_date.weekday()) % 7
+        if days_until_monday == 0 and start_date.hour < 12:
+            # It's Monday morning, use this week
+            monday = start_date
+        elif days_until_monday == 0:
+            # It's Monday afternoon/evening, use next week
+            monday = start_date + timedelta(days=7)
+        else:
+            monday = start_date + timedelta(days=days_until_monday)
+    else:
+        # For display: show current week
+        monday = start_date - timedelta(days=start_date.weekday())
+    
     monday = monday.replace(hour=0, minute=0, second=0, microsecond=0)
     
     return [monday + timedelta(days=i) for i in range(7)]
@@ -391,9 +406,9 @@ def build_schedules_modal() -> dict:
     }
 
 
-def build_plan_week_modal() -> dict:
+def build_plan_week_modal(show_daily_times: bool = False) -> dict:
     """Build modal for AI-assisted week planning."""
-    week_dates = get_week_dates()
+    week_dates = get_week_dates(planning_mode=True)
     
     day_options = [
         {
@@ -403,80 +418,126 @@ def build_plan_week_modal() -> dict:
         for date in week_dates
     ]
     
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": "🗓️ Weekly Workout Planner", "emoji": True}
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"Planning for week of {week_dates[0].strftime('%B %d')} - {week_dates[6].strftime('%B %d')}"
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "Tell me about your availability and I'll help create a plan that hits your goals!"
+            }
+        },
+        {"type": "divider"},
+        {
+            "type": "input",
+            "block_id": "unavailable_days",
+            "optional": True,
+            "element": {
+                "type": "multi_static_select",
+                "action_id": "days",
+                "placeholder": {"type": "plain_text", "text": "Select days"},
+                "options": day_options
+            },
+            "label": {"type": "plain_text", "text": "Days I CAN'T workout"}
+        },
+        {
+            "type": "input",
+            "block_id": "preferred_times",
+            "element": {
+                "type": "static_select",
+                "action_id": "time",
+                "placeholder": {"type": "plain_text", "text": "Select preference"},
+                "options": [
+                    {"text": {"type": "plain_text", "text": "🌅 Early morning (5-7am)"}, "value": "early"},
+                    {"text": {"type": "plain_text", "text": "☀️ Morning (7-10am)"}, "value": "morning"},
+                    {"text": {"type": "plain_text", "text": "🌤️ Midday (10am-2pm)"}, "value": "midday"},
+                    {"text": {"type": "plain_text", "text": "🌆 Evening (5-8pm)"}, "value": "evening"},
+                    {"text": {"type": "plain_text", "text": "🔄 Varies by day (I'll specify)"}, "value": "varies"}
+                ]
+            },
+            "label": {"type": "plain_text", "text": "Preferred workout time"}
+        }
+    ]
+    
+    # Add daily time preferences if "varies" was selected
+    if show_daily_times:
+        blocks.append({"type": "divider"})
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "*Set time preferences for each day:*"}
+        })
+        
+        time_options = [
+            {"text": {"type": "plain_text", "text": "🌅 Early (5-7am)"}, "value": "early"},
+            {"text": {"type": "plain_text", "text": "☀️ Morning (7-10am)"}, "value": "morning"},
+            {"text": {"type": "plain_text", "text": "🌤️ Midday (10am-2pm)"}, "value": "midday"},
+            {"text": {"type": "plain_text", "text": "🌆 Evening (5-8pm)"}, "value": "evening"},
+            {"text": {"type": "plain_text", "text": "⏭️ Skip this day"}, "value": "skip"},
+        ]
+        
+        day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        for i, date in enumerate(week_dates):
+            blocks.append({
+                "type": "input",
+                "block_id": f"day_time_{date.strftime('%Y-%m-%d')}",
+                "optional": True,
+                "element": {
+                    "type": "static_select",
+                    "action_id": "day_pref",
+                    "placeholder": {"type": "plain_text", "text": "Select time"},
+                    "options": time_options
+                },
+                "label": {"type": "plain_text", "text": f"{day_names[i]} ({date.strftime('%m/%d')})"}
+            })
+    
+    blocks.extend([
+        {
+            "type": "input",
+            "block_id": "swim_week",
+            "element": {
+                "type": "static_select",
+                "action_id": "swim",
+                "options": [
+                    {"text": {"type": "plain_text", "text": "Yes, include a swim this week"}, "value": "yes"},
+                    {"text": {"type": "plain_text", "text": "No, skip swimming this week"}, "value": "no"}
+                ]
+            },
+            "label": {"type": "plain_text", "text": "Swimming this week? (every other week goal)"}
+        },
+        {
+            "type": "input",
+            "block_id": "notes",
+            "optional": True,
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "notes",
+                "multiline": True,
+                "placeholder": {"type": "plain_text", "text": "Any other preferences or constraints..."}
+            },
+            "label": {"type": "plain_text", "text": "Additional notes"}
+        }
+    ])
+    
     return {
         "type": "modal",
         "callback_id": "plan_week_submit",
+        "private_metadata": "daily_times" if show_daily_times else "",
         "title": {"type": "plain_text", "text": "Plan My Week"},
         "submit": {"type": "plain_text", "text": "Generate Plan"},
         "close": {"type": "plain_text", "text": "Cancel"},
-        "blocks": [
-            {
-                "type": "header",
-                "text": {"type": "plain_text", "text": "🗓️ Weekly Workout Planner", "emoji": True}
-            },
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": "Tell me about your availability and I'll help create a plan that hits your goals!"
-                }
-            },
-            {"type": "divider"},
-            {
-                "type": "input",
-                "block_id": "unavailable_days",
-                "optional": True,
-                "element": {
-                    "type": "multi_static_select",
-                    "action_id": "days",
-                    "placeholder": {"type": "plain_text", "text": "Select days"},
-                    "options": day_options
-                },
-                "label": {"type": "plain_text", "text": "Days I CAN'T workout"}
-            },
-            {
-                "type": "input",
-                "block_id": "preferred_times",
-                "element": {
-                    "type": "static_select",
-                    "action_id": "time",
-                    "placeholder": {"type": "plain_text", "text": "Select preference"},
-                    "options": [
-                        {"text": {"type": "plain_text", "text": "🌅 Early morning (5-7am)"}, "value": "early"},
-                        {"text": {"type": "plain_text", "text": "☀️ Morning (7-10am)"}, "value": "morning"},
-                        {"text": {"type": "plain_text", "text": "🌤️ Midday (10am-2pm)"}, "value": "midday"},
-                        {"text": {"type": "plain_text", "text": "🌆 Evening (5-8pm)"}, "value": "evening"},
-                        {"text": {"type": "plain_text", "text": "🔄 Varies by day"}, "value": "varies"}
-                    ]
-                },
-                "label": {"type": "plain_text", "text": "Preferred workout time"}
-            },
-            {
-                "type": "input",
-                "block_id": "swim_week",
-                "element": {
-                    "type": "static_select",
-                    "action_id": "swim",
-                    "options": [
-                        {"text": {"type": "plain_text", "text": "Yes, include a swim this week"}, "value": "yes"},
-                        {"text": {"type": "plain_text", "text": "No, skip swimming this week"}, "value": "no"}
-                    ]
-                },
-                "label": {"type": "plain_text", "text": "Swimming this week? (every other week goal)"}
-            },
-            {
-                "type": "input",
-                "block_id": "notes",
-                "optional": True,
-                "element": {
-                    "type": "plain_text_input",
-                    "action_id": "notes",
-                    "multiline": True,
-                    "placeholder": {"type": "plain_text", "text": "Any other preferences or constraints..."}
-                },
-                "label": {"type": "plain_text", "text": "Additional notes"}
-            }
-        ]
+        "blocks": blocks
     }
 
 
@@ -504,6 +565,22 @@ async def handle_plan_week(ack, body, client: AsyncWebClient):
         trigger_id=body["trigger_id"],
         view=build_plan_week_modal()
     )
+
+
+@app.action("time")  # This catches the preferred_times select
+async def handle_time_preference_change(ack, body, client: AsyncWebClient):
+    """Handle time preference selection - show daily inputs if 'varies' selected."""
+    await ack()
+    
+    # Check if "varies" was selected
+    selected_value = body["actions"][0].get("selected_option", {}).get("value", "")
+    
+    if selected_value == "varies":
+        # Update modal to show daily time preferences
+        await client.views_update(
+            view_id=body["view"]["id"],
+            view=build_plan_week_modal(show_daily_times=True)
+        )
 
 
 @app.action("view_schedules")
@@ -565,12 +642,14 @@ async def handle_view_calendar(ack, body, client: AsyncWebClient):
 
 
 # Handle dynamic plan_day actions
-@app.action({"action_id": "plan_day_*"})
-async def handle_plan_day(ack, body, client: AsyncWebClient, action):
+@app.action(re.compile(r"plan_day_\d{4}-\d{2}-\d{2}"))
+async def handle_plan_day(ack, body, client: AsyncWebClient):
     """Handle click on 'Plan Day' button for any day."""
     await ack()
     
-    day_key = action["value"]
+    # Extract day_key from action_id (format: plan_day_YYYY-MM-DD)
+    action = body["actions"][0]
+    day_key = action["action_id"].replace("plan_day_", "")
     
     await client.views_open(
         trigger_id=body["trigger_id"],
@@ -615,6 +694,7 @@ async def handle_plan_week_submit(ack, body, client: AsyncWebClient, view):
     
     user_id = body["user"]["id"]
     values = view["state"]["values"]
+    has_daily_times = view.get("private_metadata") == "daily_times"
     
     unavailable_days = values.get("unavailable_days", {}).get("days", {}).get("selected_options", [])
     unavailable = [opt["value"] for opt in unavailable_days] if unavailable_days else []
@@ -623,11 +703,24 @@ async def handle_plan_week_submit(ack, body, client: AsyncWebClient, view):
     include_swim = values["swim_week"]["swim"]["selected_option"]["value"] == "yes"
     notes = values.get("notes", {}).get("notes", {}).get("value", "")
     
-    # Generate suggested plan
-    suggested_plan = generate_week_plan(unavailable, preferred_time, include_swim)
+    # Extract daily time preferences if present
+    daily_prefs = {}
+    if has_daily_times:
+        for block_id, block_data in values.items():
+            if block_id.startswith("day_time_"):
+                day_key = block_id.replace("day_time_", "")
+                selected = block_data.get("day_pref", {}).get("selected_option")
+                if selected:
+                    daily_prefs[day_key] = selected["value"]
     
-    # Send plan as DM
+    # Generate suggested plan
+    suggested_plan = generate_week_plan(unavailable, preferred_time, include_swim, daily_prefs if daily_prefs else None)
+    
+    # Send plan as DM (without booking reminders)
     plan_message = format_plan_message(suggested_plan)
+    
+    # Count workouts for summary
+    workout_count = len(suggested_plan)
     
     await client.chat_postMessage(
         channel=user_id,
@@ -638,16 +731,14 @@ async def handle_plan_week_submit(ack, body, client: AsyncWebClient, view):
                 "text": {"type": "plain_text", "text": "🗓️ Your Suggested Week", "emoji": True}
             },
             {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": plan_message}
+                "type": "context",
+                "elements": [
+                    {"type": "mrkdwn", "text": f"*{workout_count} workouts planned* — Weekly goal: 5"}
+                ]
             },
-            {"type": "divider"},
             {
                 "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": "*📅 Booking Reminders:*\n• solidcore - Book on the 1st of the month\n• barre3 & Cycle Sanctuary - Book 1 week out\n• Greenlake Running Group - RSVP on Meetup"
-                }
+                "text": {"type": "mrkdwn", "text": plan_message}
             },
             {
                 "type": "actions",
@@ -808,20 +899,55 @@ async def handle_workout_message(message, say, client: AsyncWebClient):
 
 
 # Helper functions
-def generate_week_plan(unavailable: list, preferred_time: str, include_swim: bool) -> dict:
+def generate_week_plan(unavailable: list, preferred_time: str, include_swim: bool, daily_prefs: dict = None) -> dict:
     """Generate a suggested workout plan based on preferences."""
-    week_dates = get_week_dates()
+    week_dates = get_week_dates(planning_mode=True)
     plan = {}
     
-    # Time suggestions based on preference
-    time_map = {
-        "early": "06:00",
-        "morning": "08:30",
-        "midday": "12:00",
-        "evening": "17:30",
-        "varies": "09:00"
+    # Actual class times for each studio by time preference
+    # Updated to match real schedules
+    studio_times = {
+        "barre3": {
+            "early": "06:00",
+            "morning": "09:30",  # Classes at 9:30, 10:45
+            "midday": "12:00",
+            "evening": "17:45",  # Classes at 5:45pm, 7pm
+        },
+        "solidcore": {
+            "early": "06:00",  # 6am, 7am classes
+            "morning": "09:30",
+            "midday": "12:00",
+            "evening": "17:30",  # 5:30pm, 6:30pm classes
+        },
+        "cycle": {
+            "early": "06:00",
+            "morning": "09:00",
+            "midday": "12:00",
+            "evening": "17:30",
+        },
+        "pool": {
+            "early": "05:30",
+            "morning": "09:00",
+            "midday": "12:00",
+            "evening": "18:00",
+        },
+        "greenlake": {
+            "early": "07:00",
+            "morning": "09:00",
+            "midday": "09:00",
+            "evening": "09:00",  # Saturday runs are morning
+        },
+        "solo_run": {
+            "early": "06:00",
+            "morning": "08:00",
+            "midday": "12:00",
+            "evening": "18:00",
+        }
     }
-    default_time = time_map.get(preferred_time, "09:00")
+    
+    def get_studio_time(studio: str, time_pref: str) -> str:
+        """Get the appropriate class time for a studio and time preference."""
+        return studio_times.get(studio, {}).get(time_pref, "09:00")
     
     # Get available days
     available_days = []
@@ -829,17 +955,28 @@ def generate_week_plan(unavailable: list, preferred_time: str, include_swim: boo
     
     for date in week_dates:
         day_key = date.strftime("%Y-%m-%d")
-        if day_key not in unavailable:
-            available_days.append((date, day_key))
-            if date.weekday() == 5:  # Saturday
-                saturday_key = day_key
+        
+        # Check if day is unavailable (either from unavailable list or daily_prefs marked as skip)
+        if day_key in unavailable:
+            continue
+        if daily_prefs and daily_prefs.get(day_key) == "skip":
+            continue
+            
+        available_days.append((date, day_key))
+        if date.weekday() == 5:  # Saturday
+            saturday_key = day_key
     
     # Assign workouts - ensure we hit 5 total
     assigned = []
     
     # Saturday is always Greenlake Running Group
-    if saturday_key and saturday_key not in unavailable:
-        plan[saturday_key] = {"studio": "greenlake", "time": "09:00", "notes": "Saturday morning run with Greenlake Running Group"}
+    if saturday_key:
+        time_pref = daily_prefs.get(saturday_key, preferred_time) if daily_prefs else preferred_time
+        plan[saturday_key] = {
+            "studio": "greenlake", 
+            "time": get_studio_time("greenlake", time_pref),
+            "notes": "Saturday morning run with Greenlake Running Group"
+        }
         assigned.append("greenlake")
         available_days = [(d, k) for d, k in available_days if k != saturday_key]
     
@@ -849,13 +986,23 @@ def generate_week_plan(unavailable: list, preferred_time: str, include_swim: boo
     for studio in required:
         if available_days:
             date, day_key = available_days.pop(0)
-            plan[day_key] = {"studio": studio, "time": default_time, "notes": ""}
+            time_pref = daily_prefs.get(day_key, preferred_time) if daily_prefs else preferred_time
+            plan[day_key] = {
+                "studio": studio, 
+                "time": get_studio_time(studio, time_pref),
+                "notes": ""
+            }
             assigned.append(studio)
     
     # Add swim if requested
     if include_swim and available_days:
         date, day_key = available_days.pop(0)
-        plan[day_key] = {"studio": "pool", "time": default_time, "notes": ""}
+        time_pref = daily_prefs.get(day_key, preferred_time) if daily_prefs else preferred_time
+        plan[day_key] = {
+            "studio": "pool", 
+            "time": get_studio_time("pool", time_pref),
+            "notes": ""
+        }
         assigned.append("pool")
     
     # If we need more workouts to hit 5, add a solo run
@@ -863,7 +1010,12 @@ def generate_week_plan(unavailable: list, preferred_time: str, include_swim: boo
         # Find a weekday for solo run
         for date, day_key in available_days:
             if date.weekday() < 5:  # Weekday
-                plan[day_key] = {"studio": "solo_run", "time": default_time, "notes": "3-5 mile run"}
+                time_pref = daily_prefs.get(day_key, preferred_time) if daily_prefs else preferred_time
+                plan[day_key] = {
+                    "studio": "solo_run", 
+                    "time": get_studio_time("solo_run", time_pref),
+                    "notes": "3-5 mile run"
+                }
                 assigned.append("solo_run")
                 break
     
@@ -872,7 +1024,7 @@ def generate_week_plan(unavailable: list, preferred_time: str, include_swim: boo
 
 def format_plan_message(plan: dict) -> str:
     """Format a plan dictionary into a readable message."""
-    week_dates = get_week_dates()
+    week_dates = get_week_dates(planning_mode=True)
     lines = []
     
     for date in week_dates:
