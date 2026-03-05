@@ -409,7 +409,7 @@ def build_schedules_modal() -> dict:
     }
 
 
-def build_plan_week_modal(show_daily_times: bool = False) -> dict:
+def build_plan_week_modal(show_daily_times: bool = False, preserved_unavailable: list = None) -> dict:
     """Build modal for AI-assisted week planning."""
     week_dates = get_week_dates(planning_mode=True)
     
@@ -420,6 +420,16 @@ def build_plan_week_modal(show_daily_times: bool = False) -> dict:
         }
         for date in week_dates
     ]
+    
+    # Build unavailable days element with preserved selection if any
+    unavailable_element = {
+        "type": "multi_static_select",
+        "action_id": "days",
+        "placeholder": {"type": "plain_text", "text": "Select days"},
+        "options": day_options
+    }
+    if preserved_unavailable:
+        unavailable_element["initial_options"] = preserved_unavailable
     
     blocks = [
         {
@@ -447,12 +457,7 @@ def build_plan_week_modal(show_daily_times: bool = False) -> dict:
             "type": "input",
             "block_id": "unavailable_days",
             "optional": True,
-            "element": {
-                "type": "multi_static_select",
-                "action_id": "days",
-                "placeholder": {"type": "plain_text", "text": "Select days"},
-                "options": day_options
-            },
+            "element": unavailable_element,
             "label": {"type": "plain_text", "text": "Days I CAN'T workout"}
         },
         {
@@ -468,7 +473,8 @@ def build_plan_week_modal(show_daily_times: bool = False) -> dict:
                     {"text": {"type": "plain_text", "text": "🌤️ Midday (10am-2pm)"}, "value": "midday"},
                     {"text": {"type": "plain_text", "text": "🌆 Evening (5-8pm)"}, "value": "evening"},
                     {"text": {"type": "plain_text", "text": "🔄 Varies by day (I'll specify)"}, "value": "varies"}
-                ]
+                ],
+                **({"initial_option": {"text": {"type": "plain_text", "text": "🔄 Varies by day (I'll specify)"}, "value": "varies"}} if show_daily_times else {})
             },
             "label": {"type": "plain_text", "text": "Preferred workout time"}
         }
@@ -579,11 +585,23 @@ async def handle_time_preference_change(ack, body, client: AsyncWebClient):
     selected_value = body["actions"][0].get("selected_option", {}).get("value", "")
     
     if selected_value == "varies":
-        # Update modal to show daily time preferences
+        # Get current form values to preserve them
+        values = body["view"]["state"]["values"]
+        
+        # Extract unavailable days if selected
+        unavailable_selected = values.get("unavailable_days", {}).get("days", {}).get("selected_options", [])
+        
+        # Update modal to show daily time preferences, preserving selections
         await client.views_update(
             view_id=body["view"]["id"],
-            view=build_plan_week_modal(show_daily_times=True)
+            view=build_plan_week_modal(show_daily_times=True, preserved_unavailable=unavailable_selected)
         )
+
+
+@app.action("day_pref")  # Handle individual day preference selections (no-op, just ack)
+async def handle_day_pref_change(ack):
+    """Acknowledge day preference selections."""
+    await ack()
 
 
 @app.action("view_schedules")
