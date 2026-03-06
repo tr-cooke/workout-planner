@@ -22,14 +22,16 @@ import re
 import json
 import logging
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Dict, List
 import asyncio
+import urllib.parse
 
 from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_sdk.web.async_client import AsyncWebClient
 
 import aiohttp
+from aiohttp import web
 from bs4 import BeautifulSoup
 import pytz
 
@@ -39,6 +41,15 @@ logger = logging.getLogger(__name__)
 
 # Anthropic API for conversational features
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+
+# Google Calendar OAuth config
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
+GOOGLE_REDIRECT_URI = os.environ.get("GOOGLE_REDIRECT_URI", "https://workout-planner-production-4139.up.railway.app/oauth/callback")
+GOOGLE_SCOPES = "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.readonly"
+
+# Store for user Google tokens (in production, use a database)
+user_google_tokens: Dict[str, dict] = {}
 
 # Initialize the Slack app
 app = AsyncApp(
@@ -641,24 +652,81 @@ async def handle_check_weather(ack, body, client: AsyncWebClient):
 
 @app.action("view_calendar")
 async def handle_view_calendar(ack, body, client: AsyncWebClient):
-    """Handle click on 'My Calendar' button - prompts to check Google Calendar."""
+    """Handle click on 'My Calendar' button - show calendar status and busy times."""
     await ack()
+    
+    user_id = body["user"]["id"]
+    
+    # Check if calendar is connected
+    if user_id in user_google_tokens:
+        # Calendar is connected - show busy times
+        busy_times = await get_busy_times(user_id)
+        
+        if busy_times:
+            busy_text = "*📅 Your busy times this week:*\n\n"
+            for event in busy_times[:10]:  # Limit to 10
+                start = event["start"]
+                if start:
+                    try:
+                        dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+                        dt_local = dt.astimezone(SEATTLE_TZ)
+                        busy_text += f"• {dt_local.strftime('%A %m/%d %I:%M %p')}: {event['summary']}\n"
+                    except:
+                        busy_text += f"• {event['summary']}\n"
+        else:
+            busy_text = "*📅 Your calendar looks clear this week!*\n\nNo conflicting events found."
+        
+        blocks = [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "✅ *Google Calendar Connected*"}
+            },
+            {"type": "divider"},
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": busy_text}
+            }
+        ]
+    else:
+        # Calendar not connected - show connect button
+        auth_url = get_google_auth_url(user_id) if GOOGLE_CLIENT_ID else None
+        
+        blocks = [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "📅 *Connect Google Calendar*\n\nLink your calendar to:\n• See busy times when planning\n• Auto-add workouts to your calendar\n• Detect existing class bookings"
+                }
+            }
+        ]
+        
+        if auth_url:
+            blocks.append({
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "🔐 Connect Google Calendar", "emoji": True},
+                        "url": auth_url,
+                        "action_id": "open_google_auth",
+                        "style": "primary"
+                    }
+                ]
+            })
+        else:
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "⚠️ _Calendar integration not configured_"}
+            })
     
     await client.views_open(
         trigger_id=body["trigger_id"],
         view={
             "type": "modal",
-            "title": {"type": "plain_text", "text": "Calendar Integration"},
+            "title": {"type": "plain_text", "text": "My Calendar"},
             "close": {"type": "plain_text", "text": "Close"},
-            "blocks": [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn", 
-                        "text": "📅 *Calendar Integration*\n\nTo check your work calendar availability, you can:\n\n1. Use `/workout-plan check-calendar` to see busy times\n2. Connect Google Calendar in the app settings\n\n_Tip: Tell me your busy days when planning your week!_"
-                    }
-                }
-            ]
+            "blocks": blocks
         }
     )
 
@@ -804,10 +872,35 @@ async def handle_apply_plan(ack, body, client: AsyncWebClient, action):
         view=build_home_view(user_id)
     )
     
-    await client.chat_postMessage(
-        channel=user_id,
-        text="✅ Plan applied! Check your App Home to see your schedule."
-    )
+    # Check if calendar is connected and offer sync
+    if user_id in user_google_tokens:
+        await client.chat_postMessage(
+            channel=user_id,
+            text="✅ Plan applied! Check your App Home to see your schedule.",
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "✅ *Plan applied!* Check your App Home to see your schedule."}
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "📅 Sync to Google Calendar", "emoji": True},
+                            "action_id": "sync_to_calendar",
+                            "style": "primary",
+                            "value": json.dumps(plan)
+                        }
+                    ]
+                }
+            ]
+        )
+    else:
+        await client.chat_postMessage(
+            channel=user_id,
+            text="✅ Plan applied! Check your App Home to see your schedule.\n\n_Tip: Connect Google Calendar to sync your workouts!_"
+        )
 
 
 # Slash commands
@@ -1219,8 +1312,500 @@ _Perfect weather for indoor workouts if it rains!_
 """
 
 
-# Main entry point
+# =============================================================================
+# Google Calendar Integration
+# =============================================================================
+
+def get_google_auth_url(user_id: str) -> str:
+    """Generate Google OAuth URL for a user."""
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": GOOGLE_SCOPES,
+        "access_type": "offline",
+        "prompt": "consent",
+        "state": user_id  # Pass user_id to link OAuth to Slack user
+    }
+    return f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
+
+
+async def exchange_code_for_tokens(code: str) -> dict:
+    """Exchange authorization code for access/refresh tokens."""
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "code": code,
+                "grant_type": "authorization_code",
+                "redirect_uri": GOOGLE_REDIRECT_URI
+            }
+        ) as response:
+            return await response.json()
+
+
+async def refresh_access_token(refresh_token: str) -> dict:
+    """Refresh an expired access token."""
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token"
+            }
+        ) as response:
+            return await response.json()
+
+
+async def get_valid_token(user_id: str) -> Optional[str]:
+    """Get a valid access token for a user, refreshing if necessary."""
+    tokens = user_google_tokens.get(user_id)
+    if not tokens:
+        return None
+    
+    # Check if token is expired (with 5 min buffer)
+    expires_at = tokens.get("expires_at", 0)
+    if datetime.now().timestamp() > expires_at - 300:
+        # Refresh the token
+        refresh_token = tokens.get("refresh_token")
+        if not refresh_token:
+            return None
+        
+        new_tokens = await refresh_access_token(refresh_token)
+        if "access_token" in new_tokens:
+            tokens["access_token"] = new_tokens["access_token"]
+            tokens["expires_at"] = datetime.now().timestamp() + new_tokens.get("expires_in", 3600)
+            user_google_tokens[user_id] = tokens
+        else:
+            logger.error(f"Failed to refresh token: {new_tokens}")
+            return None
+    
+    return tokens.get("access_token")
+
+
+async def get_calendar_events(user_id: str, start_date: datetime, end_date: datetime) -> List[dict]:
+    """Fetch calendar events for a date range."""
+    access_token = await get_valid_token(user_id)
+    if not access_token:
+        return []
+    
+    time_min = start_date.isoformat() + "Z"
+    time_max = end_date.isoformat() + "Z"
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={
+                "timeMin": time_min,
+                "timeMax": time_max,
+                "singleEvents": "true",
+                "orderBy": "startTime"
+            }
+        ) as response:
+            if response.status == 200:
+                data = await response.json()
+                return data.get("items", [])
+            else:
+                logger.error(f"Calendar API error: {response.status}")
+                return []
+
+
+def is_workout_event(event: dict) -> bool:
+    """Check if a calendar event is a workout/fitness class."""
+    summary = event.get("summary", "").lower()
+    description = event.get("description", "").lower()
+    location = event.get("location", "").lower()
+    
+    # Keywords that indicate a workout
+    workout_keywords = [
+        "barre3", "barre 3", "solidcore", "[solidcore]",
+        "cycle sanctuary", "cycling", "spin",
+        "lap swim", "swimming", "pool",
+        "running", "run club", "greenlake",
+        "workout", "fitness", "gym", "exercise",
+        "pilates", "yoga", "hiit", "strength"
+    ]
+    
+    # Studio-specific identifiers (from booking emails/invites)
+    studio_identifiers = [
+        "barre3.com", "solidcore.co", "thecyclesanctuary.com",
+        "mindbodyonline", "marianatek"
+    ]
+    
+    text_to_check = f"{summary} {description} {location}"
+    
+    for keyword in workout_keywords + studio_identifiers:
+        if keyword in text_to_check:
+            return True
+    
+    return False
+
+
+def find_existing_workout(events: List[dict], target_date: datetime, studio_key: str) -> Optional[dict]:
+    """Find if there's already a workout scheduled for this date/studio."""
+    target_day = target_date.strftime("%Y-%m-%d")
+    studio_info = STUDIOS.get(studio_key, {})
+    studio_name = studio_info.get("name", "").lower()
+    
+    for event in events:
+        event_start = event.get("start", {}).get("dateTime", event.get("start", {}).get("date", ""))
+        if target_day in event_start:
+            summary = event.get("summary", "").lower()
+            
+            # Check if this event matches the studio
+            if studio_key == "barre3" and ("barre3" in summary or "barre 3" in summary):
+                return event
+            elif studio_key == "solidcore" and ("solidcore" in summary or "[solidcore]" in summary):
+                return event
+            elif studio_key == "cycle" and ("cycle sanctuary" in summary or "cycling" in summary):
+                return event
+            elif studio_key == "pool" and ("swim" in summary or "pool" in summary):
+                return event
+            elif studio_key == "greenlake" and ("greenlake" in summary or "running" in summary):
+                return event
+            elif studio_key == "solo_run" and "run" in summary:
+                return event
+    
+    return None
+
+
+async def create_calendar_event(user_id: str, workout: dict, date_str: str) -> Optional[dict]:
+    """Create a calendar event for a workout."""
+    access_token = await get_valid_token(user_id)
+    if not access_token:
+        return None
+    
+    studio_key = workout.get("studio", "")
+    studio_info = STUDIOS.get(studio_key, {})
+    time_str = workout.get("time", "09:00")
+    notes = workout.get("notes", "")
+    
+    # Parse date and time
+    start_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+    start_dt = SEATTLE_TZ.localize(start_dt)
+    
+    # Default durations by studio
+    durations = {
+        "barre3": 60,
+        "solidcore": 50,
+        "cycle": 45,
+        "pool": 60,
+        "greenlake": 90,
+        "solo_run": 45
+    }
+    duration = durations.get(studio_key, 60)
+    end_dt = start_dt + timedelta(minutes=duration)
+    
+    event = {
+        "summary": f"{studio_info.get('emoji', '🏋️')} {studio_info.get('name', studio_key)}",
+        "location": studio_info.get("address", ""),
+        "description": f"Workout planned via Workout Planner\n{notes}".strip(),
+        "start": {
+            "dateTime": start_dt.isoformat(),
+            "timeZone": "America/Los_Angeles"
+        },
+        "end": {
+            "dateTime": end_dt.isoformat(),
+            "timeZone": "America/Los_Angeles"
+        },
+        "reminders": {
+            "useDefault": False,
+            "overrides": [
+                {"method": "popup", "minutes": 60},
+                {"method": "popup", "minutes": 15}
+            ]
+        }
+    }
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json"
+            },
+            json=event
+        ) as response:
+            if response.status == 200:
+                return await response.json()
+            else:
+                error = await response.text()
+                logger.error(f"Failed to create event: {error}")
+                return None
+
+
+async def sync_plan_to_calendar(user_id: str, plan: dict) -> dict:
+    """Sync a workout plan to Google Calendar, avoiding duplicates."""
+    if user_id not in user_google_tokens:
+        return {"success": False, "error": "Calendar not connected"}
+    
+    # Get existing events for the week
+    week_dates = get_week_dates(planning_mode=True)
+    start_date = week_dates[0].replace(tzinfo=None)
+    end_date = (week_dates[6] + timedelta(days=1)).replace(tzinfo=None)
+    
+    existing_events = await get_calendar_events(user_id, start_date, end_date)
+    
+    created = []
+    skipped = []
+    
+    for date_str, workout in plan.items():
+        studio_key = workout.get("studio", "")
+        target_date = datetime.strptime(date_str, "%Y-%m-%d")
+        
+        # Check if there's already a matching workout
+        existing = find_existing_workout(existing_events, target_date, studio_key)
+        
+        if existing:
+            skipped.append({
+                "date": date_str,
+                "studio": studio_key,
+                "existing_event": existing.get("summary", "Unknown")
+            })
+        else:
+            # Create the event
+            result = await create_calendar_event(user_id, workout, date_str)
+            if result:
+                created.append({
+                    "date": date_str,
+                    "studio": studio_key,
+                    "event_id": result.get("id")
+                })
+    
+    return {
+        "success": True,
+        "created": created,
+        "skipped": skipped
+    }
+
+
+async def get_busy_times(user_id: str) -> List[dict]:
+    """Get busy times for the planning week."""
+    if user_id not in user_google_tokens:
+        return []
+    
+    week_dates = get_week_dates(planning_mode=True)
+    start_date = week_dates[0].replace(tzinfo=None)
+    end_date = (week_dates[6] + timedelta(days=1)).replace(tzinfo=None)
+    
+    events = await get_calendar_events(user_id, start_date, end_date)
+    
+    busy_times = []
+    for event in events:
+        if is_workout_event(event):
+            continue  # Don't show workouts as "busy"
+        
+        start = event.get("start", {})
+        end = event.get("end", {})
+        
+        # Skip all-day events for now
+        if "date" in start and "dateTime" not in start:
+            continue
+        
+        busy_times.append({
+            "summary": event.get("summary", "Busy"),
+            "start": start.get("dateTime", ""),
+            "end": end.get("dateTime", "")
+        })
+    
+    return busy_times
+
+
+# =============================================================================
+# OAuth Web Server Handlers
+# =============================================================================
+
+async def handle_oauth_callback(request: web.Request) -> web.Response:
+    """Handle Google OAuth callback."""
+    code = request.query.get("code")
+    user_id = request.query.get("state")  # We passed user_id as state
+    
+    if not code or not user_id:
+        return web.Response(text="Missing code or state parameter", status=400)
+    
+    # Exchange code for tokens
+    tokens = await exchange_code_for_tokens(code)
+    
+    if "access_token" not in tokens:
+        logger.error(f"OAuth error: {tokens}")
+        return web.Response(text="Failed to get access token", status=400)
+    
+    # Store tokens for user
+    user_google_tokens[user_id] = {
+        "access_token": tokens["access_token"],
+        "refresh_token": tokens.get("refresh_token"),
+        "expires_at": datetime.now().timestamp() + tokens.get("expires_in", 3600)
+    }
+    
+    logger.info(f"Successfully connected Google Calendar for user {user_id}")
+    
+    # Return a nice success page
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Calendar Connected!</title>
+        <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; 
+                   display: flex; justify-content: center; align-items: center; 
+                   height: 100vh; margin: 0; background: #f5f5f5; }
+            .container { text-align: center; padding: 40px; background: white; 
+                         border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+            h1 { color: #1a5f7a; }
+            p { color: #666; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>✅ Calendar Connected!</h1>
+            <p>Your Google Calendar is now linked to Workout Planner.</p>
+            <p>You can close this window and return to Slack.</p>
+        </div>
+    </body>
+    </html>
+    """
+    return web.Response(text=html, content_type="text/html")
+
+
+async def handle_health_check(request: web.Request) -> web.Response:
+    """Health check endpoint."""
+    return web.Response(text="OK")
+
+
+# =============================================================================
+# Slack Action Handlers for Calendar
+# =============================================================================
+
+@app.action("connect_calendar")
+async def handle_connect_calendar(ack, body, client: AsyncWebClient):
+    """Handle click on 'Connect Calendar' button."""
+    await ack()
+    
+    user_id = body["user"]["id"]
+    
+    if not GOOGLE_CLIENT_ID:
+        await client.chat_postMessage(
+            channel=user_id,
+            text="❌ Google Calendar integration is not configured. Please add GOOGLE_CLIENT_ID to the environment."
+        )
+        return
+    
+    auth_url = get_google_auth_url(user_id)
+    
+    await client.chat_postMessage(
+        channel=user_id,
+        text="🔗 *Connect Google Calendar*\n\nClick the button below to connect your Google Calendar:",
+        blocks=[
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "🔗 *Connect Google Calendar*\n\nThis will allow the Workout Planner to:\n• See your busy times when planning\n• Add workout events to your calendar\n• Detect existing workout bookings"
+                }
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "🔐 Connect Google Calendar", "emoji": True},
+                        "url": auth_url,
+                        "action_id": "open_google_auth"
+                    }
+                ]
+            }
+        ]
+    )
+
+
+@app.action("open_google_auth")
+async def handle_open_google_auth(ack):
+    """Just acknowledge - the button opens a URL."""
+    await ack()
+
+
+@app.action("sync_to_calendar")
+async def handle_sync_to_calendar(ack, body, client: AsyncWebClient, action):
+    """Sync the current plan to Google Calendar."""
+    await ack()
+    
+    user_id = body["user"]["id"]
+    
+    # Check if calendar is connected
+    if user_id not in user_google_tokens:
+        await client.chat_postMessage(
+            channel=user_id,
+            text="❌ Please connect your Google Calendar first! Use the 'Connect Calendar' button in the App Home."
+        )
+        return
+    
+    # Get the plan from the action value
+    try:
+        plan = json.loads(action["value"])
+    except:
+        plan = user_data.get(user_id, {}).get("workouts", {})
+    
+    if not plan:
+        await client.chat_postMessage(
+            channel=user_id,
+            text="❌ No workout plan to sync. Create a plan first!"
+        )
+        return
+    
+    # Sync to calendar
+    result = await sync_plan_to_calendar(user_id, plan)
+    
+    if result["success"]:
+        created_count = len(result["created"])
+        skipped_count = len(result["skipped"])
+        
+        message = f"✅ *Calendar Synced!*\n\n"
+        
+        if created_count > 0:
+            message += f"📅 Created {created_count} event(s):\n"
+            for item in result["created"]:
+                date = datetime.strptime(item["date"], "%Y-%m-%d").strftime("%A %m/%d")
+                studio = STUDIOS.get(item["studio"], {}).get("name", item["studio"])
+                message += f"• {date}: {studio}\n"
+        
+        if skipped_count > 0:
+            message += f"\n⏭️ Skipped {skipped_count} (already on calendar):\n"
+            for item in result["skipped"]:
+                date = datetime.strptime(item["date"], "%Y-%m-%d").strftime("%A %m/%d")
+                message += f"• {date}: {item['existing_event']}\n"
+        
+        await client.chat_postMessage(channel=user_id, text=message)
+    else:
+        await client.chat_postMessage(
+            channel=user_id,
+            text=f"❌ Failed to sync: {result.get('error', 'Unknown error')}"
+        )
+
+
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+
 async def main():
+    # Start the web server for OAuth callbacks
+    web_app = web.Application()
+    web_app.router.add_get("/oauth/callback", handle_oauth_callback)
+    web_app.router.add_get("/health", handle_health_check)
+    
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"Web server started on port {port}")
+    
+    # Start the Slack Socket Mode handler
     handler = AsyncSocketModeHandler(app, os.environ["SLACK_APP_TOKEN"])
     await handler.start_async()
 
