@@ -1063,21 +1063,44 @@ async def chat_with_claude(user_message: str, current_schedule: dict, user_id: s
             "schedule_updated": False
         }
     
-    # Get current week info
-    week_dates = get_week_dates(planning_mode=True)
+    # Get both weeks
     today = datetime.now(SEATTLE_TZ)
+    this_week_dates = get_week_dates()
+    next_week_dates = get_week_dates(start_date=this_week_dates[6] + timedelta(days=1))
+    all_dates = this_week_dates + next_week_dates
     
     # Format current schedule for Claude
-    schedule_text = ""
-    for date in week_dates:
+    schedule_text = "*This Week:*\n"
+    for date in this_week_dates:
         day_key = date.strftime("%Y-%m-%d")
         day_name = date.strftime("%A, %m/%d")
         workout = current_schedule.get(day_key)
         if workout:
             studio = workout["studio"]
             time = workout["time"]
+            class_name = workout.get("class_name", "")
             name = STUDIOS.get(studio, {}).get("name", studio)
-            schedule_text += f"- {day_name} ({day_key}): {name} at {time}\n"
+            if class_name:
+                schedule_text += f"- {day_name} ({day_key}): {class_name} at {time}\n"
+            else:
+                schedule_text += f"- {day_name} ({day_key}): {name} at {time}\n"
+        else:
+            schedule_text += f"- {day_name} ({day_key}): Rest day\n"
+    
+    schedule_text += "\n*Next Week:*\n"
+    for date in next_week_dates:
+        day_key = date.strftime("%Y-%m-%d")
+        day_name = date.strftime("%A, %m/%d")
+        workout = current_schedule.get(day_key)
+        if workout:
+            studio = workout["studio"]
+            time = workout["time"]
+            class_name = workout.get("class_name", "")
+            name = STUDIOS.get(studio, {}).get("name", studio)
+            if class_name:
+                schedule_text += f"- {day_name} ({day_key}): {class_name} at {time}\n"
+            else:
+                schedule_text += f"- {day_name} ({day_key}): {name} at {time}\n"
         else:
             schedule_text += f"- {day_name} ({day_key}): Rest day\n"
     
@@ -1092,31 +1115,60 @@ Available studios and their keys:
 - solo_run: Solo Run (any time, 3-5 miles)
 """
     
+    # Build list of dates for reference
+    date_reference = "Date reference for the next two weeks:\n"
+    for date in all_dates:
+        date_reference += f"- {date.strftime('%A')} = {date.strftime('%Y-%m-%d')}\n"
+    
     system_prompt = f"""You are a helpful workout planning assistant for a family fitness planner. Today is {today.strftime("%A, %B %d, %Y")}.
 
-The user's current workout schedule for the week of {week_dates[0].strftime("%B %d")} - {week_dates[6].strftime("%B %d")}:
+The user's current workout schedule:
 {schedule_text}
 
 {studios_info}
 
-Weekly goals: 5 workouts total (1 barre3, 1 solidcore, 1 Cycle Sanctuary, 1-2 runs, optional swim)
+{date_reference}
+
+Weekly goals: 5 workouts total (1 barre3, 1 solidcore, 1 Cycle Sanctuary, 1-2 runs, optional swim every other week)
 
 Your job:
 1. Understand what the user wants to do with their schedule
-2. If they want to make changes (move, add, remove, swap workouts), output a JSON block with the changes
+2. If they want to make changes (move, add, remove, swap workouts, or plan specific workouts on specific days), output a JSON block with ALL the changes
 3. Be friendly and conversational
+
+CRITICAL INSTRUCTIONS FOR HANDLING REQUESTS:
+- When the user asks for specific workouts on specific days (e.g., "swim Monday, barre Tuesday"), you MUST create entries for EACH workout mentioned
+- Use the date reference above to convert day names to YYYY-MM-DD format
+- If the user says "Monday" without specifying which week, assume THIS upcoming Monday (or today if today is Monday)
+- If a day has already passed this week, use next week's date for that day
+- Always include ALL requested changes in a single JSON block
 
 IMPORTANT: If making schedule changes, you MUST include a JSON block in your response like this:
 ```json
-{{"action": "update", "changes": {{"YYYY-MM-DD": {{"studio": "studio_key", "time": "HH:MM", "notes": "optional"}}, "YYYY-MM-DD": null}}}}
+{{"action": "update", "changes": {{"YYYY-MM-DD": {{"studio": "studio_key", "time": "HH:MM", "class_name": "optional class name", "notes": "optional"}}, "YYYY-MM-DD": {{"studio": "another_studio", "time": "HH:MM"}}}}}}
 ```
+
+Examples:
+- "swim Monday, barre Tuesday" with Monday=2026-03-09 and Tuesday=2026-03-10:
+```json
+{{"action": "update", "changes": {{"2026-03-09": {{"studio": "pool", "time": "09:00"}}, "2026-03-10": {{"studio": "barre3", "time": "09:30"}}}}}}
+```
+
+- "remove Thursday's workout" with Thursday=2026-03-12:
+```json
+{{"action": "update", "changes": {{"2026-03-12": null}}}}
+```
+
+Rules:
 - Use null to remove a workout from a day
 - Use the studio keys exactly: barre3, solidcore, cycle, pool, greenlake, solo_run
 - Use 24-hour time format (e.g., "13:00" for 1 PM, "17:30" for 5:30 PM)
+- If user doesn't specify a time, use a reasonable default for that studio
+- Include class_name if the user specifies one (e.g., "barre3 Cardio 45")
 
 If NOT making changes (just answering questions), don't include any JSON block.
 
-Keep responses concise and friendly."""
+Keep responses concise and friendly. Confirm what changes you're making."""
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -1163,6 +1215,7 @@ Keep responses concise and friendly."""
                                     new_schedule[day_key] = {
                                         "studio": workout.get("studio", ""),
                                         "time": workout.get("time", "09:00"),
+                                        "class_name": workout.get("class_name", ""),
                                         "notes": workout.get("notes", "")
                                     }
                             schedule_updated = True
