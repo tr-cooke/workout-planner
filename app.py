@@ -590,15 +590,16 @@ def build_plan_week_modal(show_daily_times: bool = False, preserved_unavailable:
         },
         {
             "type": "input",
-            "block_id": "notes",
+            "block_id": "special_requests",
             "optional": True,
             "element": {
                 "type": "plain_text_input",
-                "action_id": "notes",
+                "action_id": "requests",
                 "multiline": True,
-                "placeholder": {"type": "plain_text", "text": "Any other preferences or constraints..."}
+                "placeholder": {"type": "plain_text", "text": "e.g., swim Monday, barre3 Tuesday evening, solidcore Wednesday morning"}
             },
-            "label": {"type": "plain_text", "text": "Additional notes"}
+            "label": {"type": "plain_text", "text": "Specific workout requests"},
+            "hint": {"type": "plain_text", "text": "Tell me which workouts you want on which days and I'll build around that"}
         }
     ])
     
@@ -844,7 +845,7 @@ async def handle_plan_week_submit(ack, body, client: AsyncWebClient, view):
     
     preferred_time = values["preferred_times"]["time"]["selected_option"]["value"]
     include_swim = values["swim_week"]["swim"]["selected_option"]["value"] == "yes"
-    notes = values.get("notes", {}).get("notes", {}).get("value", "")
+    special_requests = values.get("special_requests", {}).get("requests", {}).get("value", "")
     
     # Extract daily time preferences if present
     daily_prefs = {}
@@ -856,10 +857,20 @@ async def handle_plan_week_submit(ack, body, client: AsyncWebClient, view):
                 if selected:
                     daily_prefs[day_key] = selected["value"]
     
-    # Generate suggested plan
-    suggested_plan = generate_week_plan(unavailable, preferred_time, include_swim, daily_prefs if daily_prefs else None)
+    # If there are special requests, use Claude to generate the plan
+    if special_requests and ANTHROPIC_API_KEY:
+        suggested_plan = await generate_plan_with_claude(
+            special_requests=special_requests,
+            unavailable=unavailable,
+            preferred_time=preferred_time,
+            include_swim=include_swim,
+            daily_prefs=daily_prefs
+        )
+    else:
+        # Use the basic plan generator
+        suggested_plan = generate_week_plan(unavailable, preferred_time, include_swim, daily_prefs if daily_prefs else None)
     
-    # Send plan as DM (without booking reminders)
+    # Send plan as DM
     plan_message = format_plan_message(suggested_plan)
     
     # Count workouts for summary
@@ -1241,6 +1252,127 @@ Keep responses concise and friendly. Confirm what changes you're making."""
             "message": "Sorry, I had trouble processing that. Try `/workout plan` to use the planning wizard.",
             "schedule_updated": False
         }
+
+
+async def generate_plan_with_claude(special_requests: str, unavailable: list, preferred_time: str, include_swim: bool, daily_prefs: dict = None) -> dict:
+    """Use Claude to generate a workout plan based on special requests."""
+    
+    week_dates = get_week_dates(planning_mode=True)
+    today = datetime.now(SEATTLE_TZ)
+    
+    # Build date reference
+    date_reference = ""
+    for date in week_dates:
+        date_reference += f"- {date.strftime('%A')} = {date.strftime('%Y-%m-%d')}\n"
+    
+    # Build unavailable days text
+    unavailable_text = ", ".join(unavailable) if unavailable else "None"
+    
+    # Time preference text
+    time_pref_map = {
+        "early": "early morning (5-7am)",
+        "morning": "morning (7-10am)", 
+        "midday": "midday (10am-2pm)",
+        "evening": "evening (5-8pm)",
+        "varies": "varies by day"
+    }
+    time_pref_text = time_pref_map.get(preferred_time, preferred_time)
+    
+    studios_info = """
+Available studios and their keys:
+- barre3: barre3 Ballard (classes at 6:00, 9:30, 12:00, 17:45)
+- solidcore: solidcore Ballard (classes at 6:00, 7:00, 9:30, 12:00, 17:30, 18:30)
+- cycle: Cycle Sanctuary (classes at 6:00, 9:00, 12:00, 17:30)
+- pool: Ballard Public Pool / lap swim (5:30, 9:00, 12:00, 18:00)
+- greenlake: Greenlake Running Group (Saturday mornings, 7:00 or 9:00)
+- solo_run: Solo Run (any time, 3-5 miles)
+"""
+
+    system_prompt = f"""You are a workout planning assistant. Generate a weekly workout plan based on the user's requests.
+
+Today is {today.strftime("%A, %B %d, %Y")}.
+
+Date reference for this week:
+{date_reference}
+
+{studios_info}
+
+User preferences:
+- Unavailable days: {unavailable_text}
+- Preferred time: {time_pref_text}
+- Include swimming: {"Yes" if include_swim else "No"}
+
+Weekly goals: 5 workouts total (1 barre3, 1 solidcore, 1 Cycle Sanctuary, 1-2 runs, optional swim)
+
+INSTRUCTIONS:
+1. Parse the user's special requests to understand which workouts they want on which days
+2. Honor their specific requests FIRST
+3. Fill in remaining days to reach 5 workouts, avoiding unavailable days
+4. Saturday should typically be Greenlake Running Group unless specified otherwise
+5. Use appropriate times based on their time preference
+
+You MUST respond with ONLY a JSON object (no other text) in this exact format:
+{{"YYYY-MM-DD": {{"studio": "studio_key", "time": "HH:MM", "class_name": "optional"}}, "YYYY-MM-DD": {{"studio": "studio_key", "time": "HH:MM"}}}}
+
+Use 24-hour time format. Use the exact studio keys: barre3, solidcore, cycle, pool, greenlake, solo_run
+Only include days that have workouts (skip rest days)."""
+
+    user_message = f"Create a workout plan with these specific requests: {special_requests}"
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json"
+                },
+                json={
+                    "model": "claude-sonnet-4-20250514",
+                    "max_tokens": 1024,
+                    "system": system_prompt,
+                    "messages": [{"role": "user", "content": user_message}]
+                }
+            ) as response:
+                if response.status != 200:
+                    logger.error(f"Claude API error: {response.status}")
+                    # Fall back to basic plan
+                    return generate_week_plan(unavailable, preferred_time, include_swim, daily_prefs)
+                
+                data = await response.json()
+                response_text = data["content"][0]["text"].strip()
+                
+                # Try to parse the JSON response
+                # Remove any markdown code blocks if present
+                response_text = re.sub(r'```json\s*', '', response_text)
+                response_text = re.sub(r'```\s*', '', response_text)
+                
+                try:
+                    plan_data = json.loads(response_text)
+                    
+                    # Convert to the expected format
+                    plan = {}
+                    for day_key, workout in plan_data.items():
+                        if workout:
+                            plan[day_key] = {
+                                "studio": workout.get("studio", ""),
+                                "time": workout.get("time", "09:00"),
+                                "class_name": workout.get("class_name", ""),
+                                "notes": workout.get("notes", "")
+                            }
+                    
+                    return plan
+                    
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse Claude plan response: {e}")
+                    # Fall back to basic plan
+                    return generate_week_plan(unavailable, preferred_time, include_swim, daily_prefs)
+                    
+    except Exception as e:
+        logger.error(f"Error generating plan with Claude: {e}")
+        # Fall back to basic plan
+        return generate_week_plan(unavailable, preferred_time, include_swim, daily_prefs)
 
 
 # Helper functions
