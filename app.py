@@ -35,6 +35,13 @@ from aiohttp import web
 from bs4 import BeautifulSoup
 import pytz
 
+# Import schedule scrapers
+try:
+    from integrations.solidcore_scraper import scrape_solidcore_schedule, get_fallback_schedule
+    SOLIDCORE_SCRAPER_AVAILABLE = True
+except ImportError:
+    SOLIDCORE_SCRAPER_AVAILABLE = False
+
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -673,10 +680,128 @@ async def handle_view_schedules(ack, body, client: AsyncWebClient):
     """Handle click on 'View Schedules' button."""
     await ack()
     
+    # Build the live schedules modal (this fetches data)
+    live_modal = await build_live_schedules_modal()
+    
     await client.views_open(
         trigger_id=body["trigger_id"],
-        view=build_schedules_modal()
+        view=live_modal
     )
+
+
+async def build_live_schedules_modal() -> dict:
+    """Build modal showing live schedule data from studios."""
+    today = datetime.now(SEATTLE_TZ)
+    
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": "📋 Today's Classes", "emoji": True}
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"*{today.strftime('%A, %B %d')}* — Live schedule data"
+                }
+            ]
+        },
+        {"type": "divider"}
+    ]
+    
+    # Fetch solidcore schedule
+    if SOLIDCORE_SCRAPER_AVAILABLE:
+        try:
+            solidcore_classes = await scrape_solidcore_schedule(days_ahead=1)
+            today_str = today.strftime("%Y-%m-%d")
+            today_classes = [c for c in solidcore_classes if c.date == today_str]
+            
+            if today_classes:
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "*💪 solidcore Ballard*"}
+                })
+                
+                class_text = ""
+                for cls in today_classes[:6]:  # Limit to 6 classes
+                    spots = f"({cls.spots_available} spots)" if cls.spots_available else ""
+                    class_text += f"• *{cls.time}* - {cls.name} w/ {cls.instructor} {spots}\n"
+                
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": class_text}
+                })
+            else:
+                blocks.append({
+                    "type": "section", 
+                    "text": {"type": "mrkdwn", "text": "*💪 solidcore Ballard*\n_No classes found for today_"}
+                })
+        except Exception as e:
+            logger.error(f"Error fetching solidcore schedule: {e}")
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "*💪 solidcore Ballard*\n_Unable to fetch schedule_"}
+            })
+    else:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "*💪 solidcore Ballard*\n_Scraper not available_"}
+        })
+    
+    blocks.append({"type": "divider"})
+    
+    # Add links to other studios (not scraped yet)
+    blocks.append({
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "*🩰 barre3 Ballard*\n_Live schedule coming soon_"},
+        "accessory": {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Open Schedule"},
+            "url": "https://barre3.com/studio-locations/ballard/schedule",
+            "action_id": "open_barre3"
+        }
+    })
+    
+    blocks.append({
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "*🚴 Cycle Sanctuary*\n_Live schedule coming soon_"},
+        "accessory": {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Open Schedule"},
+            "url": "https://www.thecyclesanctuary.com/schedule",
+            "action_id": "open_cycle"
+        }
+    })
+    
+    blocks.append({
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "*🏊 Ballard Public Pool*\n_Live schedule coming soon_"},
+        "accessory": {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Open Schedule"},
+            "url": "https://anc.apm.activecommunities.com/seattle/calendars?onlineSiteId=0&filter_Location=26",
+            "action_id": "open_pool"
+        }
+    })
+    
+    blocks.append({
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "*🏃 Greenlake Running Group*\nSaturday mornings at Green Lake"},
+        "accessory": {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Open Meetup"},
+            "url": "https://www.meetup.com/seattle-greenlake-running-group/",
+            "action_id": "open_greenlake"
+        }
+    })
+    
+    return {
+        "type": "modal",
+        "title": {"type": "plain_text", "text": "Studio Schedules"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": blocks
+    }
 
 
 @app.action("check_weather")

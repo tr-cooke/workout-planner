@@ -20,3 +20,4 @@ requests>=2.31.0
 
 # Date parsing
 python-dateutil>=2.8.2
+playwrite>1.40.0
