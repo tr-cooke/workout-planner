@@ -36,11 +36,17 @@ from bs4 import BeautifulSoup
 import pytz
 
 # Import schedule scrapers
+SOLIDCORE_SCRAPER_AVAILABLE = False
+scrape_solidcore_schedule = None
+get_fallback_schedule = None
+
 try:
     from integrations.solidcore_scraper import scrape_solidcore_schedule, get_fallback_schedule
     SOLIDCORE_SCRAPER_AVAILABLE = True
-except ImportError:
-    SOLIDCORE_SCRAPER_AVAILABLE = False
+except ImportError as e:
+    print(f"Solidcore scraper not available: {e}")
+except Exception as e:
+    print(f"Error importing solidcore scraper: {e}")
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
