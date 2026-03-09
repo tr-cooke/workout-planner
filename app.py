@@ -42,6 +42,11 @@ logger = logging.getLogger(__name__)
 # Anthropic API for conversational features
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
+# OpenWeatherMap API for real weather
+OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY")
+SEATTLE_LAT = 47.6062
+SEATTLE_LON = -122.3321
+
 # Google Calendar OAuth config
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
@@ -172,7 +177,8 @@ def get_booking_reminder(studio_key: str) -> str:
 def build_home_view(user_id: str) -> dict:
     """Build the App Home view with workout planning dashboard."""
     today = datetime.now(SEATTLE_TZ)
-    week_dates = get_week_dates()
+    this_week_dates = get_week_dates()  # Current week
+    next_week_dates = get_week_dates(start_date=this_week_dates[6] + timedelta(days=1))  # Next week
     
     # Get user's scheduled workouts
     user_workouts = user_data.get(user_id, {}).get("workouts", {})
@@ -187,74 +193,100 @@ def build_home_view(user_id: str) -> dict:
             }
         },
         {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"Week of {week_dates[0].strftime('%B %d')} - {week_dates[6].strftime('%B %d, %Y')}"
-                }
-            ]
-        },
-        {"type": "divider"},
-        {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "*Weekly Goal:* 5 workouts\n• 1 barre3 🩰\n• 1 solidcore 💪\n• 1 Cycle Sanctuary 🚴\n• 1-2 runs 🏃 (Saturday Greenlake + weekday solo)\n• 1 swim 🏊 (every other week)"
+                "text": "*Weekly Goal:* 5 workouts\n• 1 barre3 🩰  • 1 solidcore 💪  • 1 Cycle Sanctuary 🚴\n• 1-2 runs 🏃  • 1 swim 🏊 (every other week)"
             }
         },
-        {"type": "divider"},
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "*📅 This Week's Schedule*"
-            }
-        }
+        {"type": "divider"}
     ]
     
-    # Add each day with workout options
     day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     
-    for i, date in enumerate(week_dates):
-        day_key = date.strftime("%Y-%m-%d")
-        day_workout = user_workouts.get(day_key, {})
+    def format_workout_text(day_workout: dict) -> str:
+        """Format a workout entry with class name if available."""
+        if not day_workout:
+            return "_No workout planned_"
         
-        workout_text = "No workout planned"
-        if day_workout:
-            studio = day_workout.get("studio", "")
-            time = day_workout.get("time", "")
-            workout_text = f"{STUDIOS.get(studio, {}).get('emoji', '✨')} {STUDIOS.get(studio, {}).get('name', studio)} {time}"
+        studio = day_workout.get("studio", "")
+        time = day_workout.get("time", "")
+        class_name = day_workout.get("class_name", "")
+        notes = day_workout.get("notes", "")
         
-        # Saturday is special - Greenlake running group
-        if i == 5:  # Saturday
-            blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*{day_names[i]} ({date.strftime('%m/%d')})*\n{workout_text}\n_🏃 Greenlake Running Group meets Saturday mornings_"
-                },
-                "accessory": {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Plan Day", "emoji": True},
-                    "action_id": f"plan_day_{day_key}",
-                    "value": day_key
-                }
-            })
+        emoji = STUDIOS.get(studio, {}).get("emoji", "✨")
+        studio_name = STUDIOS.get(studio, {}).get("name", studio)
+        
+        # Use class_name if provided, otherwise studio name
+        if class_name:
+            return f"{emoji} *{class_name}* at {time}"
+        elif notes and any(x in notes.lower() for x in ["signature", "cardio", "express", "full body"]):
+            # If notes contain a class type, show it
+            return f"{emoji} *{studio_name}: {notes}* at {time}"
         else:
+            return f"{emoji} {studio_name} at {time}"
+    
+    def add_week_section(week_dates: list, week_label: str, is_current_week: bool = False):
+        """Add a week's schedule to the blocks."""
+        # Week header
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*📅 {week_label}* ({week_dates[0].strftime('%b %d')} - {week_dates[6].strftime('%b %d')})"
+            }
+        })
+        
+        # Count workouts for the week
+        week_workout_count = sum(
+            1 for date in week_dates 
+            if user_workouts.get(date.strftime("%Y-%m-%d"))
+        )
+        
+        if week_workout_count > 0:
+            goal_status = "✅" if week_workout_count >= 5 else f"({week_workout_count}/5)"
+            blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f"Workouts planned: {week_workout_count} {goal_status}"}]
+            })
+        
+        for i, date in enumerate(week_dates):
+            day_key = date.strftime("%Y-%m-%d")
+            day_workout = user_workouts.get(day_key, {})
+            workout_text = format_workout_text(day_workout)
+            
+            # Check if this day is today
+            is_today = date.date() == today.date()
+            day_label = f"*{day_names[i]} ({date.strftime('%m/%d')})*"
+            if is_today:
+                day_label = f"*{day_names[i]} ({date.strftime('%m/%d')})* 👈 Today"
+            
+            # Saturday note
+            saturday_note = ""
+            if i == 5:  # Saturday
+                saturday_note = "\n_🏃 Greenlake Running Group meets Saturdays_"
+            
             blocks.append({
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*{day_names[i]} ({date.strftime('%m/%d')})*\n{workout_text}"
+                    "text": f"{day_label}\n{workout_text}{saturday_note}"
                 },
                 "accessory": {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "Plan Day", "emoji": True},
+                    "text": {"type": "plain_text", "text": "Edit", "emoji": True},
                     "action_id": f"plan_day_{day_key}",
                     "value": day_key
                 }
             })
+        
+        blocks.append({"type": "divider"})
+    
+    # Add this week
+    add_week_section(this_week_dates, "This Week", is_current_week=True)
+    
+    # Add next week
+    add_week_section(next_week_dates, "Next Week")
     
     # Add booking reminders
     reminders = []
@@ -264,7 +296,6 @@ def build_home_view(user_id: str) -> dict:
             reminders.append(reminder)
     
     if reminders:
-        blocks.append({"type": "divider"})
         blocks.append({
             "type": "section",
             "text": {
@@ -272,37 +303,35 @@ def build_home_view(user_id: str) -> dict:
                 "text": "*🔔 Booking Reminders*\n" + "\n".join(reminders)
             }
         })
+        blocks.append({"type": "divider"})
     
     # Add quick actions
-    blocks.extend([
-        {"type": "divider"},
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "🗓️ Plan My Week", "emoji": True},
-                    "action_id": "plan_week",
-                    "style": "primary"
-                },
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "☀️ Check Weather", "emoji": True},
-                    "action_id": "check_weather"
-                },
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "📋 View Schedules", "emoji": True},
-                    "action_id": "view_schedules"
-                },
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "📊 My Calendar", "emoji": True},
-                    "action_id": "view_calendar"
-                }
-            ]
-        }
-    ])
+    blocks.append({
+        "type": "actions",
+        "elements": [
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "🗓️ Plan My Week", "emoji": True},
+                "action_id": "plan_week",
+                "style": "primary"
+            },
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "☀️ Weather", "emoji": True},
+                "action_id": "check_weather"
+            },
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "📋 Schedules", "emoji": True},
+                "action_id": "view_schedules"
+            },
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "📊 Calendar", "emoji": True},
+                "action_id": "view_calendar"
+            }
+        ]
+    })
     
     return {"type": "home", "blocks": blocks}
 
@@ -319,6 +348,16 @@ def build_plan_day_modal(day_key: str) -> dict:
         }
         for key, info in STUDIOS.items()
     ]
+    
+    # Common class names for quick selection
+    class_name_examples = {
+        "barre3": "e.g., barre3 Signature, barre3 Cardio 45, barre3 Express 30",
+        "solidcore": "e.g., Signature50: Full Body, Arms & Abs, Lower Body",
+        "cycle": "e.g., Power Cycle 45, HIIT Cycle, Performance 60",
+        "pool": "e.g., Lap Swim, Masters Swim",
+        "greenlake": "e.g., Saturday Morning Run, Tuesday Evening Run",
+        "solo_run": "e.g., 3 mile easy, 5 mile tempo"
+    }
     
     return {
         "type": "modal",
@@ -345,6 +384,18 @@ def build_plan_day_modal(day_key: str) -> dict:
             },
             {
                 "type": "input",
+                "block_id": "class_name_input",
+                "optional": True,
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "class_name",
+                    "placeholder": {"type": "plain_text", "text": "e.g., Signature50: Full Body, barre3 Cardio 45"}
+                },
+                "label": {"type": "plain_text", "text": "Class Name (optional)"},
+                "hint": {"type": "plain_text", "text": "Add the specific class name from the studio schedule"}
+            },
+            {
+                "type": "input",
                 "block_id": "time_select",
                 "element": {
                     "type": "timepicker",
@@ -361,7 +412,7 @@ def build_plan_day_modal(day_key: str) -> dict:
                     "type": "plain_text_input",
                     "action_id": "notes",
                     "multiline": True,
-                    "placeholder": {"type": "plain_text", "text": "Class name, instructor, etc."}
+                    "placeholder": {"type": "plain_text", "text": "Instructor, notes, etc."}
                 },
                 "label": {"type": "plain_text", "text": "Notes (optional)"}
             }
@@ -758,6 +809,7 @@ async def handle_plan_day_submit(ack, body, client: AsyncWebClient, view):
     
     studio = values["studio_select"]["studio"]["selected_option"]["value"]
     time = values["time_select"]["time"]["selected_time"]
+    class_name = values.get("class_name_input", {}).get("class_name", {}).get("value", "")
     notes = values.get("notes_input", {}).get("notes", {}).get("value", "")
     
     # Save to user data
@@ -767,6 +819,7 @@ async def handle_plan_day_submit(ack, body, client: AsyncWebClient, view):
     user_data[user_id]["workouts"][day_key] = {
         "studio": studio,
         "time": time,
+        "class_name": class_name,
         "notes": notes
     }
     
@@ -1289,27 +1342,128 @@ def format_plan_message(plan: dict) -> str:
 
 
 async def fetch_seattle_weather() -> str:
-    """Fetch current Seattle weather."""
-    # In production, this would call a weather API
-    # For now, return placeholder
-    return """
-☀️ *Seattle Weather*
-
-🌡️ Today: 52°F / Partly Cloudy
-💨 Wind: 8 mph
-🌧️ Rain chance: 30%
-
-*This Week:*
-• Mon: 54°F ☁️
-• Tue: 51°F 🌧️
-• Wed: 49°F 🌧️
-• Thu: 53°F ⛅
-• Fri: 55°F ☀️
-• Sat: 52°F ⛅ _(Good for Greenlake run!)_
-• Sun: 50°F ☁️
-
-_Perfect weather for indoor workouts if it rains!_
-"""
+    """Fetch current Seattle weather from OpenWeatherMap API."""
+    
+    if not OPENWEATHER_API_KEY:
+        return "_Weather data not configured. Add OPENWEATHER_API_KEY to enable._"
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Get current weather
+            current_url = f"https://api.openweathermap.org/data/2.5/weather?lat={SEATTLE_LAT}&lon={SEATTLE_LON}&appid={OPENWEATHER_API_KEY}&units=imperial"
+            
+            async with session.get(current_url) as response:
+                if response.status != 200:
+                    logger.error(f"Weather API error: {response.status}")
+                    return "_Unable to fetch weather data_"
+                
+                current = await response.json()
+            
+            # Get 5-day forecast
+            forecast_url = f"https://api.openweathermap.org/data/2.5/forecast?lat={SEATTLE_LAT}&lon={SEATTLE_LON}&appid={OPENWEATHER_API_KEY}&units=imperial"
+            
+            async with session.get(forecast_url) as response:
+                if response.status != 200:
+                    forecast_data = None
+                else:
+                    forecast_data = await response.json()
+        
+        # Parse current weather
+        temp = round(current["main"]["temp"])
+        feels_like = round(current["main"]["feels_like"])
+        humidity = current["main"]["humidity"]
+        wind_speed = round(current["wind"]["speed"])
+        description = current["weather"][0]["description"].title()
+        
+        # Weather emoji mapping
+        def get_weather_emoji(condition: str, icon: str) -> str:
+            condition = condition.lower()
+            if "rain" in condition or "drizzle" in condition:
+                return "🌧️"
+            elif "cloud" in condition:
+                if "few" in condition or "scattered" in condition:
+                    return "⛅"
+                return "☁️"
+            elif "snow" in condition:
+                return "❄️"
+            elif "thunder" in condition:
+                return "⛈️"
+            elif "clear" in condition:
+                # Check if night
+                if icon.endswith("n"):
+                    return "🌙"
+                return "☀️"
+            elif "mist" in condition or "fog" in condition:
+                return "🌫️"
+            return "🌤️"
+        
+        current_emoji = get_weather_emoji(description, current["weather"][0]["icon"])
+        
+        # Build message
+        message = f"{current_emoji} *Seattle Weather*\n\n"
+        message += f"🌡️ *{temp}°F* ({description})\n"
+        message += f"🤔 Feels like {feels_like}°F\n"
+        message += f"💨 Wind: {wind_speed} mph\n"
+        message += f"💧 Humidity: {humidity}%\n"
+        
+        # Parse forecast for the week
+        if forecast_data:
+            message += "\n*This Week:*\n"
+            
+            # Group forecast by day and get midday reading
+            daily_forecasts = {}
+            for item in forecast_data["list"]:
+                dt = datetime.fromtimestamp(item["dt"], tz=SEATTLE_TZ)
+                day_key = dt.strftime("%Y-%m-%d")
+                hour = dt.hour
+                
+                # Prefer midday forecast (around noon)
+                if day_key not in daily_forecasts or abs(hour - 12) < abs(daily_forecasts[day_key]["hour"] - 12):
+                    daily_forecasts[day_key] = {
+                        "temp": round(item["main"]["temp"]),
+                        "description": item["weather"][0]["description"],
+                        "icon": item["weather"][0]["icon"],
+                        "hour": hour,
+                        "day_name": dt.strftime("%a")
+                    }
+            
+            # Show next 5 days
+            today = datetime.now(SEATTLE_TZ).strftime("%Y-%m-%d")
+            count = 0
+            for day_key in sorted(daily_forecasts.keys()):
+                if day_key <= today:
+                    continue
+                if count >= 5:
+                    break
+                    
+                forecast = daily_forecasts[day_key]
+                emoji = get_weather_emoji(forecast["description"], forecast["icon"])
+                day_name = forecast["day_name"]
+                
+                # Special note for Saturday (Greenlake run day)
+                if day_name == "Sat":
+                    if "rain" in forecast["description"].lower():
+                        message += f"• {day_name}: {forecast['temp']}°F {emoji} _(Might want backup indoor workout)_\n"
+                    else:
+                        message += f"• {day_name}: {forecast['temp']}°F {emoji} _(Good for Greenlake run!)_\n"
+                else:
+                    message += f"• {day_name}: {forecast['temp']}°F {emoji}\n"
+                
+                count += 1
+        
+        # Workout suggestion based on weather
+        if "rain" in description.lower():
+            message += "\n_☔ Rainy today - great day for indoor workouts!_"
+        elif temp < 40:
+            message += "\n_🥶 Cold out there - dress in layers for outdoor runs!_"
+        elif temp > 70:
+            message += "\n_🌞 Nice weather! Perfect for a run at Green Lake._"
+        
+        return message
+        
+    except Exception as e:
+        logger.error(f"Weather fetch error: {e}")
+        return "_Unable to fetch weather data. Please try again later._"
 
 
 # =============================================================================
