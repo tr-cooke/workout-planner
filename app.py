@@ -129,8 +129,32 @@ WEEKLY_GOALS = {
     "total": {"min": 5, "max": 5}
 }
 
+# File path for persistent storage
+DATA_FILE = os.environ.get("DATA_FILE", "/app/data/user_data.json")
+
+def load_user_data() -> dict:
+    """Load user data from JSON file."""
+    try:
+        if os.path.exists(DATA_FILE):
+            with open(DATA_FILE, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.error(f"Error loading user data: {e}")
+    return {}
+
+def save_user_data():
+    """Save user data to JSON file."""
+    try:
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
+        with open(DATA_FILE, 'w') as f:
+            json.dump(user_data, f, indent=2)
+        logger.debug("User data saved successfully")
+    except Exception as e:
+        logger.error(f"Error saving user data: {e}")
+
 # Store for user preferences and scheduled workouts
-user_data = {}
+user_data = load_user_data()
 
 
 def get_week_dates(start_date: Optional[datetime] = None, planning_mode: bool = False) -> list:
@@ -949,6 +973,9 @@ async def handle_plan_day_submit(ack, body, client: AsyncWebClient, view):
         "notes": notes
     }
     
+    # Persist to file
+    save_user_data()
+    
     # Update home view
     await client.views_publish(
         user_id=user_id,
@@ -1054,6 +1081,9 @@ async def handle_apply_plan(ack, body, client: AsyncWebClient, action):
     for day_key, workout in plan.items():
         if workout:
             user_data[user_id]["workouts"][day_key] = workout
+    
+    # Persist to file
+    save_user_data()
     
     # Update home view
     await client.views_publish(
@@ -1181,6 +1211,9 @@ async def handle_message(message, say, client: AsyncWebClient):
             user_data[user_id] = {"workouts": {}}
         user_data[user_id]["workouts"] = response["new_schedule"]
         
+        # Persist to file
+        save_user_data()
+        
         # Update home view
         await client.views_publish(
             user_id=user_id,
@@ -1240,6 +1273,37 @@ async def chat_with_claude(user_message: str, current_schedule: dict, user_id: s
         else:
             schedule_text += f"- {day_name} ({day_key}): Rest day\n"
     
+    # Fetch Google Calendar events if connected
+    calendar_text = ""
+    if user_id in user_google_tokens:
+        try:
+            start_date = this_week_dates[0]
+            end_date = next_week_dates[6]
+            calendar_events = await get_calendar_events(user_id, start_date, end_date)
+            
+            if calendar_events:
+                calendar_text = "\n*User's Google Calendar events (non-workout):*\n"
+                for event in calendar_events[:20]:  # Limit to 20 events
+                    summary = event.get("summary", "Busy")
+                    start = event.get("start", "")
+                    if start:
+                        try:
+                            # Handle all-day events vs timed events
+                            if "dateTime" in event.get("start", {}):
+                                dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+                                dt_local = dt.astimezone(SEATTLE_TZ)
+                                calendar_text += f"- {dt_local.strftime('%A %m/%d %I:%M %p')}: {summary}\n"
+                            else:
+                                # All day event
+                                calendar_text += f"- {start}: {summary} (all day)\n"
+                        except:
+                            calendar_text += f"- {summary}\n"
+        except Exception as e:
+            logger.error(f"Error fetching calendar for Claude: {e}")
+            calendar_text = "\n_Could not fetch Google Calendar events._\n"
+    else:
+        calendar_text = "\n_Google Calendar not connected. User can connect via the Calendar button._\n"
+    
     # Studios info for Claude
     studios_info = """
 Available studios and their keys:
@@ -1261,6 +1325,8 @@ Available studios and their keys:
 The user's current workout schedule:
 {schedule_text}
 
+{calendar_text}
+
 {studios_info}
 
 {date_reference}
@@ -1271,6 +1337,7 @@ Your job:
 1. Understand what the user wants to do with their schedule
 2. If they want to make changes (move, add, remove, swap workouts, or plan specific workouts on specific days), output a JSON block with ALL the changes
 3. Be friendly and conversational
+4. If the user asks about their calendar or schedule conflicts, use the Google Calendar events shown above to help them plan around their commitments
 
 CRITICAL INSTRUCTIONS FOR HANDLING REQUESTS:
 - When the user asks for specific workouts on specific days (e.g., "swim Monday, barre Tuesday"), you MUST create entries for EACH workout mentioned

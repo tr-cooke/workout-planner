@@ -3,17 +3,21 @@ FROM mcr.microsoft.com/playwright/python:v1.40.0-jammy
 
 WORKDIR /app
 
+# Create data directory for persistent storage
+RUN mkdir -p /app/data
+
 # Copy requirements first for better caching
 COPY requirements.txt .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies (playwright is already in the image)
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt || \
+    pip install --no-cache-dir slack-bolt slack-sdk aiohttp beautifulsoup4 lxml pytz python-dotenv requests python-dateutil
 
 # Copy app code
 COPY . .
 
-# Install Playwright browsers
-RUN playwright install chromium
+# Playwright browsers are already installed in this image
 
 # Run the app
 CMD ["python", "app.py"]
