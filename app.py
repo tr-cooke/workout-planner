@@ -37,8 +37,17 @@ import pytz
 
 # Import schedule scrapers
 SOLIDCORE_SCRAPER_AVAILABLE = False
+SCHEDULE_CACHE_AVAILABLE = False
 scrape_solidcore_schedule = None
 get_fallback_schedule = None
+
+try:
+    from integrations.schedule_cache import get_schedule_cache, ScheduleCache
+    SCHEDULE_CACHE_AVAILABLE = True
+except ImportError as e:
+    print(f"Schedule cache not available: {e}")
+except Exception as e:
+    print(f"Error importing schedule cache: {e}")
 
 try:
     from integrations.solidcore_scraper import scrape_solidcore_schedule, get_fallback_schedule
@@ -722,6 +731,7 @@ async def handle_view_schedules(ack, body, client: AsyncWebClient):
 async def build_live_schedules_modal() -> dict:
     """Build modal showing live schedule data from studios."""
     today = datetime.now(SEATTLE_TZ)
+    today_str = today.strftime("%Y-%m-%d")
     
     blocks = [
         {
@@ -733,88 +743,184 @@ async def build_live_schedules_modal() -> dict:
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": f"*{today.strftime('%A, %B %d')}* — Live schedule data"
+                    "text": f"*{today.strftime('%A, %B %d')}* — Schedule data (cached weekly)"
                 }
             ]
         },
         {"type": "divider"}
     ]
     
-    # Fetch solidcore schedule
-    if SOLIDCORE_SCRAPER_AVAILABLE:
+    # Use the schedule cache if available
+    if SCHEDULE_CACHE_AVAILABLE:
         try:
-            solidcore_classes = await scrape_solidcore_schedule(days_ahead=1)
-            today_str = today.strftime("%Y-%m-%d")
-            today_classes = [c for c in solidcore_classes if c.date == today_str]
+            cache = get_schedule_cache()
             
-            if today_classes:
+            # solidcore
+            solidcore_classes = await cache.get_solidcore_schedule()
+            today_solidcore = [c for c in solidcore_classes if c.get("date") == today_str]
+            
+            if today_solidcore:
                 blocks.append({
                     "type": "section",
                     "text": {"type": "mrkdwn", "text": "*💪 solidcore Ballard*"}
                 })
-                
                 class_text = ""
-                for cls in today_classes[:6]:  # Limit to 6 classes
-                    spots = f"({cls.spots_available} spots)" if cls.spots_available else ""
-                    class_text += f"• *{cls.time}* - {cls.name} w/ {cls.instructor} {spots}\n"
-                
+                for cls in today_solidcore[:6]:
+                    spots = f"({cls.get('spots_available')} spots)" if cls.get('spots_available') else ""
+                    class_text += f"• *{cls['time']}* - {cls['class_name']} w/ {cls.get('instructor', 'TBD')} {spots}\n"
                 blocks.append({
                     "type": "section",
                     "text": {"type": "mrkdwn", "text": class_text}
                 })
             else:
                 blocks.append({
-                    "type": "section", 
-                    "text": {"type": "mrkdwn", "text": "*💪 solidcore Ballard*\n_No classes found for today_"}
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "*💪 solidcore Ballard*\n_No classes today_"}
                 })
+            
+            blocks.append({"type": "divider"})
+            
+            # Cycle Sanctuary
+            cycle_classes = await cache.get_cycle_schedule()
+            today_cycle = [c for c in cycle_classes if c.get("date") == today_str]
+            
+            if today_cycle:
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "*🚴 Cycle Sanctuary*"}
+                })
+                class_text = ""
+                for cls in today_cycle[:6]:
+                    duration = f"({cls.get('duration_minutes')} min)" if cls.get('duration_minutes') else ""
+                    class_text += f"• *{cls['time']}* - {cls['class_name']} {duration}\n"
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": class_text}
+                })
+            else:
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "*🚴 Cycle Sanctuary*\n_No classes today_"}
+                })
+            
+            blocks.append({"type": "divider"})
+            
+            # barre3
+            barre3_classes = await cache.get_barre3_schedule()
+            today_barre3 = [c for c in barre3_classes if c.get("date") == today_str]
+            
+            if today_barre3:
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "*🩰 barre3 Ballard*"}
+                })
+                class_text = ""
+                for cls in today_barre3[:6]:
+                    duration = f"({cls.get('duration_minutes')} min)" if cls.get('duration_minutes') else ""
+                    class_text += f"• *{cls['time']}* - {cls['class_name']} {duration}\n"
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": class_text}
+                })
+            else:
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "*🩰 barre3 Ballard*\n_No classes today_"}
+                })
+            
+            blocks.append({"type": "divider"})
+            
+            # Pool
+            pool_classes = await cache.get_pool_schedule()
+            today_pool = [c for c in pool_classes if c.get("date") == today_str]
+            
+            if today_pool:
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "*🏊 Ballard Public Pool*"}
+                })
+                class_text = ""
+                for cls in today_pool[:4]:
+                    duration = f"({cls.get('duration_minutes')} min)" if cls.get('duration_minutes') else ""
+                    class_text += f"• *{cls['time']}* - {cls['class_name']} {duration}\n"
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": class_text}
+                })
+            else:
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "*🏊 Ballard Public Pool*\n_No lap swim today_"}
+                })
+            
+            blocks.append({"type": "divider"})
+            
+            # Show cache status
+            cache_status = cache.get_cache_status()
+            status_text = "_Schedule data refreshes weekly. Last updated:_\n"
+            for studio, status in cache_status.items():
+                if status['class_count'] > 0:
+                    try:
+                        last_dt = datetime.fromisoformat(status['last_updated'])
+                        status_text += f"• {studio}: {last_dt.strftime('%m/%d %I:%M %p')}\n"
+                    except:
+                        status_text += f"• {studio}: {status['last_updated']}\n"
+            
+            blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": status_text}]
+            })
+            
         except Exception as e:
-            logger.error(f"Error fetching solidcore schedule: {e}")
+            logger.error(f"Error fetching schedules from cache: {e}")
             blocks.append({
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": "*💪 solidcore Ballard*\n_Unable to fetch schedule_"}
+                "text": {"type": "mrkdwn", "text": "_Error loading schedules. Please try again._"}
             })
     else:
+        # Fallback to links if cache not available
         blocks.append({
             "type": "section",
-            "text": {"type": "mrkdwn", "text": "*💪 solidcore Ballard*\n_Scraper not available_"}
+            "text": {"type": "mrkdwn", "text": "*💪 solidcore Ballard*"},
+            "accessory": {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Open Schedule"},
+                "url": "https://solidcore.co/studios/ballard",
+                "action_id": "open_solidcore"
+            }
+        })
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "*🚴 Cycle Sanctuary*"},
+            "accessory": {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Open Schedule"},
+                "url": "https://www.thecyclesanctuary.com/schedule",
+                "action_id": "open_cycle"
+            }
+        })
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "*🩰 barre3 Ballard*"},
+            "accessory": {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Open Schedule"},
+                "url": "https://barre3.com/studio-locations/ballard/schedule",
+                "action_id": "open_barre3"
+            }
+        })
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "*🏊 Ballard Public Pool*"},
+            "accessory": {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Open Schedule"},
+                "url": "https://anc.apm.activecommunities.com/seattle/calendars?onlineSiteId=0&filter_Location=26",
+                "action_id": "open_pool"
+            }
         })
     
-    blocks.append({"type": "divider"})
-    
-    # Add links to other studios (not scraped yet)
-    blocks.append({
-        "type": "section",
-        "text": {"type": "mrkdwn", "text": "*🩰 barre3 Ballard*\n_Live schedule coming soon_"},
-        "accessory": {
-            "type": "button",
-            "text": {"type": "plain_text", "text": "Open Schedule"},
-            "url": "https://barre3.com/studio-locations/ballard/schedule",
-            "action_id": "open_barre3"
-        }
-    })
-    
-    blocks.append({
-        "type": "section",
-        "text": {"type": "mrkdwn", "text": "*🚴 Cycle Sanctuary*\n_Live schedule coming soon_"},
-        "accessory": {
-            "type": "button",
-            "text": {"type": "plain_text", "text": "Open Schedule"},
-            "url": "https://www.thecyclesanctuary.com/schedule",
-            "action_id": "open_cycle"
-        }
-    })
-    
-    blocks.append({
-        "type": "section",
-        "text": {"type": "mrkdwn", "text": "*🏊 Ballard Public Pool*\n_Live schedule coming soon_"},
-        "accessory": {
-            "type": "button",
-            "text": {"type": "plain_text", "text": "Open Schedule"},
-            "url": "https://anc.apm.activecommunities.com/seattle/calendars?onlineSiteId=0&filter_Location=26",
-            "action_id": "open_pool"
-        }
-    })
-    
+    # Always show Greenlake Running Group
     blocks.append({
         "type": "section",
         "text": {"type": "mrkdwn", "text": "*🏃 Greenlake Running Group*\nSaturday mornings at Green Lake"},
