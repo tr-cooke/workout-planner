@@ -9,6 +9,9 @@ aiohttp>=3.8.0
 beautifulsoup4>=4.12.0
 lxml>=4.9.0
 
+# Browser automation (for studios without APIs)
+playwright>=1.40.0
+
 # Timezone handling
 pytz>=2023.3
 
@@ -20,4 +23,3 @@ requests>=2.31.0
 
 # Date parsing
 python-dateutil>=2.8.2
-playwrite>1.40.0

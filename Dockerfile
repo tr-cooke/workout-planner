@@ -9,7 +9,7 @@ RUN mkdir -p /app/data
 # Copy requirements first for better caching
 COPY requirements.txt .
 
-# Install Python dependencies (playwright is already in the image)
+# Install Python dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt || \
     pip install --no-cache-dir slack-bolt slack-sdk aiohttp beautifulsoup4 lxml pytz python-dotenv requests python-dateutil
@@ -17,7 +17,9 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy app code
 COPY . .
 
-# Playwright browsers are already installed in this image
+# Install Firefox (barre3 requires it to bypass headless detection)
+# The base image has Chromium but we need Firefox too
+RUN playwright install firefox
 
 # Run the app
 CMD ["python", "app.py"]

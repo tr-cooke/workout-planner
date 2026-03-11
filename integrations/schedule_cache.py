@@ -195,7 +195,7 @@ class ScheduleCache:
             return self._get_cached_classes(studio)
     
     async def get_barre3_schedule(self, force_refresh: bool = False) -> List[Dict]:
-        """Get barre3 schedule (via Mindbody API when available)."""
+        """Get barre3 schedule (via scraping)."""
         studio = "barre3"
         
         if not force_refresh and not self._is_stale(studio):
@@ -204,12 +204,37 @@ class ScheduleCache:
         
         logger.info(f"Refreshing {studio} schedule...")
         
-        # TODO: Implement Mindbody API fetch when credentials available
-        # For now, return fallback schedule
-        
-        fallback_classes = self._get_barre3_fallback()
-        self._update_cache(studio, fallback_classes)
-        return fallback_classes
+        try:
+            from integrations.barre3_scraper import scrape_barre3_schedule, get_barre3_fallback_schedule
+            
+            classes = await scrape_barre3_schedule(days_ahead=14)
+            
+            if classes:
+                class_dicts = [c.to_dict() for c in classes]
+                self._update_cache(studio, class_dicts)
+                return class_dicts
+            else:
+                # Use fallback
+                logger.warning(f"Scraping failed, using fallback for {studio}")
+                fallback_classes = []
+                today = datetime.now(SEATTLE_TZ)
+                for i in range(14):
+                    date = today + timedelta(days=i)
+                    fallback_classes.extend(get_barre3_fallback_schedule(date))
+                self._update_cache(studio, fallback_classes)
+                return fallback_classes
+                
+        except ImportError:
+            logger.error("barre3 scraper not available, using built-in fallback")
+            fallback_classes = self._get_barre3_fallback()
+            self._update_cache(studio, fallback_classes)
+            return fallback_classes
+        except Exception as e:
+            logger.error(f"Error refreshing {studio}: {e}")
+            cached = self._get_cached_classes(studio)
+            if cached:
+                return cached
+            return self._get_barre3_fallback()
     
     def _get_barre3_fallback(self) -> List[Dict]:
         """Get fallback barre3 schedule."""
@@ -259,12 +284,42 @@ class ScheduleCache:
         
         logger.info(f"Refreshing {studio} schedule...")
         
-        # TODO: Implement Seattle Parks website scraping
-        # For now, return fallback schedule
-        
-        fallback_classes = self._get_pool_fallback()
-        self._update_cache(studio, fallback_classes)
-        return fallback_classes
+        try:
+            from integrations.pool_scraper import scrape_pool_schedule, get_pool_classes_for_date, get_fallback_pool_schedule, FALLBACK_SESSIONS
+            
+            sessions = await scrape_pool_schedule()
+            
+            if sessions:
+                # Convert sessions to classes for the next 14 days
+                all_classes = []
+                today = datetime.now(SEATTLE_TZ)
+                for i in range(14):
+                    date = today + timedelta(days=i)
+                    day_classes = get_pool_classes_for_date(sessions, date)
+                    all_classes.extend(day_classes)
+                
+                self._update_cache(studio, all_classes)
+                return all_classes
+            else:
+                # Use fallback
+                logger.warning(f"Scraping failed, using fallback for {studio}")
+                fallback_classes = []
+                today = datetime.now(SEATTLE_TZ)
+                for i in range(14):
+                    date = today + timedelta(days=i)
+                    fallback_classes.extend(get_fallback_pool_schedule(date))
+                self._update_cache(studio, fallback_classes)
+                return fallback_classes
+                
+        except ImportError:
+            logger.error("Pool scraper not available, using built-in fallback")
+            return self._get_pool_fallback()
+        except Exception as e:
+            logger.error(f"Error refreshing {studio}: {e}")
+            cached = self._get_cached_classes(studio)
+            if cached:
+                return cached
+            return self._get_pool_fallback()
     
     def _get_pool_fallback(self) -> List[Dict]:
         """Get fallback Ballard Pool lap swim schedule."""
