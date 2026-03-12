@@ -719,8 +719,8 @@ async def handle_view_schedules(ack, body, client: AsyncWebClient):
     """Handle click on 'View Schedules' button."""
     await ack()
     
-    # Build the live schedules modal (this fetches data)
-    live_modal = await build_live_schedules_modal()
+    # Build the live schedules modal for today (default)
+    live_modal = await build_live_schedules_modal(day_offset=0)
     
     await client.views_open(
         trigger_id=body["trigger_id"],
@@ -728,24 +728,56 @@ async def handle_view_schedules(ack, body, client: AsyncWebClient):
     )
 
 
-async def build_live_schedules_modal() -> dict:
+@app.action("schedule_day_select")
+async def handle_schedule_day_select(ack, body, client: AsyncWebClient):
+    """Handle day selection in schedules modal."""
+    await ack()
+    
+    # Get selected day offset
+    selected_value = body["actions"][0]["selected_option"]["value"]
+    day_offset = int(selected_value)
+    
+    # Rebuild modal with selected day
+    live_modal = await build_live_schedules_modal(day_offset=day_offset)
+    
+    await client.views_update(
+        view_id=body["view"]["id"],
+        view=live_modal
+    )
+
+
+async def build_live_schedules_modal(day_offset: int = 0) -> dict:
     """Build modal showing live schedule data from studios."""
     today = datetime.now(SEATTLE_TZ)
-    today_str = today.strftime("%Y-%m-%d")
+    target_date = today + timedelta(days=day_offset)
+    target_str = target_date.strftime("%Y-%m-%d")
+    day_name = target_date.strftime("%A")
+    
+    # Build day selector options (next 7 days)
+    day_options = []
+    for i in range(7):
+        d = today + timedelta(days=i)
+        label = "Today" if i == 0 else ("Tomorrow" if i == 1 else d.strftime("%a %m/%d"))
+        day_options.append({
+            "text": {"type": "plain_text", "text": label},
+            "value": str(i)
+        })
     
     blocks = [
         {
-            "type": "header",
-            "text": {"type": "plain_text", "text": "📋 Today's Classes", "emoji": True}
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*📋 {day_name}, {target_date.strftime('%B %d')}*"},
+            "accessory": {
+                "type": "static_select",
+                "placeholder": {"type": "plain_text", "text": "Select day"},
+                "initial_option": day_options[day_offset],
+                "options": day_options,
+                "action_id": "schedule_day_select"
+            }
         },
         {
             "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"*{today.strftime('%A, %B %d')}* — Schedule data (cached weekly)"
-                }
-            ]
+            "elements": [{"type": "mrkdwn", "text": "_Schedule data cached weekly_"}]
         },
         {"type": "divider"}
     ]
@@ -757,15 +789,15 @@ async def build_live_schedules_modal() -> dict:
             
             # solidcore
             solidcore_classes = await cache.get_solidcore_schedule()
-            today_solidcore = [c for c in solidcore_classes if c.get("date") == today_str]
+            day_solidcore = [c for c in solidcore_classes if c.get("date") == target_str]
             
-            if today_solidcore:
+            if day_solidcore:
                 blocks.append({
                     "type": "section",
                     "text": {"type": "mrkdwn", "text": "*💪 solidcore Ballard*"}
                 })
                 class_text = ""
-                for cls in today_solidcore[:6]:
+                for cls in day_solidcore:  # Show ALL classes
                     spots = f"({cls.get('spots_available')} spots)" if cls.get('spots_available') else ""
                     class_text += f"• *{cls['time']}* - {cls['class_name']} w/ {cls.get('instructor', 'TBD')} {spots}\n"
                 blocks.append({
@@ -775,22 +807,22 @@ async def build_live_schedules_modal() -> dict:
             else:
                 blocks.append({
                     "type": "section",
-                    "text": {"type": "mrkdwn", "text": "*💪 solidcore Ballard*\n_No classes today_"}
+                    "text": {"type": "mrkdwn", "text": "*💪 solidcore Ballard*\n_No classes this day_"}
                 })
             
             blocks.append({"type": "divider"})
             
             # Cycle Sanctuary
             cycle_classes = await cache.get_cycle_schedule()
-            today_cycle = [c for c in cycle_classes if c.get("date") == today_str]
+            day_cycle = [c for c in cycle_classes if c.get("date") == target_str]
             
-            if today_cycle:
+            if day_cycle:
                 blocks.append({
                     "type": "section",
                     "text": {"type": "mrkdwn", "text": "*🚴 Cycle Sanctuary*"}
                 })
                 class_text = ""
-                for cls in today_cycle[:6]:
+                for cls in day_cycle:  # Show ALL classes
                     duration = f"({cls.get('duration_minutes')} min)" if cls.get('duration_minutes') else ""
                     class_text += f"• *{cls['time']}* - {cls['class_name']} {duration}\n"
                 blocks.append({
@@ -800,22 +832,22 @@ async def build_live_schedules_modal() -> dict:
             else:
                 blocks.append({
                     "type": "section",
-                    "text": {"type": "mrkdwn", "text": "*🚴 Cycle Sanctuary*\n_No classes today_"}
+                    "text": {"type": "mrkdwn", "text": "*🚴 Cycle Sanctuary*\n_No classes this day_"}
                 })
             
             blocks.append({"type": "divider"})
             
             # barre3
             barre3_classes = await cache.get_barre3_schedule()
-            today_barre3 = [c for c in barre3_classes if c.get("date") == today_str]
+            day_barre3 = [c for c in barre3_classes if c.get("date") == target_str]
             
-            if today_barre3:
+            if day_barre3:
                 blocks.append({
                     "type": "section",
                     "text": {"type": "mrkdwn", "text": "*🩰 barre3 Ballard*"}
                 })
                 class_text = ""
-                for cls in today_barre3[:6]:
+                for cls in day_barre3:  # Show ALL classes
                     duration = f"({cls.get('duration_minutes')} min)" if cls.get('duration_minutes') else ""
                     class_text += f"• *{cls['time']}* - {cls['class_name']} {duration}\n"
                 blocks.append({
@@ -825,24 +857,24 @@ async def build_live_schedules_modal() -> dict:
             else:
                 blocks.append({
                     "type": "section",
-                    "text": {"type": "mrkdwn", "text": "*🩰 barre3 Ballard*\n_No classes today_"}
+                    "text": {"type": "mrkdwn", "text": "*🩰 barre3 Ballard*\n_No classes this day_"}
                 })
             
             blocks.append({"type": "divider"})
             
-            # Pool
+            # Pool - show ALL swim sessions
             pool_classes = await cache.get_pool_schedule()
-            today_pool = [c for c in pool_classes if c.get("date") == today_str]
+            day_pool = [c for c in pool_classes if c.get("date") == target_str]
             
-            if today_pool:
+            if day_pool:
                 blocks.append({
                     "type": "section",
                     "text": {"type": "mrkdwn", "text": "*🏊 Ballard Public Pool*"}
                 })
                 class_text = ""
-                for cls in today_pool[:4]:
-                    duration = f"({cls.get('duration_minutes')} min)" if cls.get('duration_minutes') else ""
-                    class_text += f"• *{cls['time']}* - {cls['class_name']} {duration}\n"
+                for cls in day_pool:  # Show ALL sessions
+                    time_end = f"-{cls.get('time_end')}" if cls.get('time_end') else ""
+                    class_text += f"• *{cls['time']}{time_end}* - {cls['class_name']}\n"
                 blocks.append({
                     "type": "section",
                     "text": {"type": "mrkdwn", "text": class_text}
@@ -850,35 +882,48 @@ async def build_live_schedules_modal() -> dict:
             else:
                 blocks.append({
                     "type": "section",
-                    "text": {"type": "mrkdwn", "text": "*🏊 Ballard Public Pool*\n_No lap swim today_"}
+                    "text": {"type": "mrkdwn", "text": "*🏊 Ballard Public Pool*\n_No swim sessions this day_"}
                 })
             
             blocks.append({"type": "divider"})
             
-            # Show cache status
-            cache_status = cache.get_cache_status()
-            status_text = "_Schedule data refreshes weekly. Last updated:_\n"
-            for studio, status in cache_status.items():
-                if status['class_count'] > 0:
-                    try:
-                        last_dt = datetime.fromisoformat(status['last_updated'])
-                        status_text += f"• {studio}: {last_dt.strftime('%m/%d %I:%M %p')}\n"
-                    except:
-                        status_text += f"• {studio}: {status['last_updated']}\n"
+            # Greenlake Running Group - show Saturday runs + any daily runs
+            is_saturday = target_date.weekday() == 5
+            greenlake_text = "*🏃 Greenlake Running Group*\n"
+            
+            if is_saturday:
+                greenlake_text += "• *8:00 AM* - Saturday Morning Group Run at Green Lake\n"
+            
+            # Add note about daily runs if not Saturday
+            if not is_saturday:
+                greenlake_text += "_Saturday mornings at Green Lake (8 AM)_\n"
+                greenlake_text += "_Check Meetup for weekday run events_"
             
             blocks.append({
-                "type": "context",
-                "elements": [{"type": "mrkdwn", "text": status_text}]
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": greenlake_text},
+                "accessory": {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "View Meetup"},
+                    "url": "https://www.meetup.com/seattle-greenlake-running-group/events/",
+                    "action_id": "open_greenlake"
+                }
             })
             
         except Exception as e:
             logger.error(f"Error fetching schedules from cache: {e}")
+            import traceback
+            traceback.print_exc()
             blocks.append({
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": "_Error loading schedules. Please try again._"}
             })
     else:
         # Fallback to links if cache not available
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "_Schedule cache not available. Use links below:_"}
+        })
         blocks.append({
             "type": "section",
             "text": {"type": "mrkdwn", "text": "*💪 solidcore Ballard*"},
@@ -919,18 +964,16 @@ async def build_live_schedules_modal() -> dict:
                 "action_id": "open_pool"
             }
         })
-    
-    # Always show Greenlake Running Group
-    blocks.append({
-        "type": "section",
-        "text": {"type": "mrkdwn", "text": "*🏃 Greenlake Running Group*\nSaturday mornings at Green Lake"},
-        "accessory": {
-            "type": "button",
-            "text": {"type": "plain_text", "text": "Open Meetup"},
-            "url": "https://www.meetup.com/seattle-greenlake-running-group/",
-            "action_id": "open_greenlake"
-        }
-    })
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "*🏃 Greenlake Running Group*\nSaturday mornings at Green Lake"},
+            "accessory": {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Open Meetup"},
+                "url": "https://www.meetup.com/seattle-greenlake-running-group/",
+                "action_id": "open_greenlake"
+            }
+        })
     
     return {
         "type": "modal",

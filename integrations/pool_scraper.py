@@ -229,12 +229,14 @@ async def scrape_pool_schedule() -> List[PoolSession]:
                         if not session_program:
                             continue
                             
-                        # Include lap swim sessions AND water exercise (good workout options)
+                        # Include lap swim, water exercise, adult swim, and recreation/lap combo
                         program_lower = session_program.lower()
                         is_lap_swim = 'lap swim' in program_lower or 'lap' in program_lower
                         is_water_exercise = 'water exercise' in program_lower or 'deep water' in program_lower or 'shallow water' in program_lower
+                        is_adult_swim = 'adult' in program_lower or 'senior' in program_lower
+                        is_recreation_lap = 'recreation' in program_lower and 'lap' in program_lower
                         
-                        if is_lap_swim or is_water_exercise:
+                        if is_lap_swim or is_water_exercise or is_adult_swim or is_recreation_lap:
                             if day_str and time_str:
                                 # Skip notes/exceptions like "***Jan. 9, 16..."
                                 if time_str.startswith('*'):
