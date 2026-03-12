@@ -1610,7 +1610,9 @@ async def generate_plan_with_claude(special_requests: str, unavailable: list, pr
     # Build date reference
     date_reference = ""
     for date in week_dates:
-        date_reference += f"- {date.strftime('%A')} = {date.strftime('%Y-%m-%d')}\n"
+        day_name = date.strftime('%A')
+        date_str = date.strftime('%Y-%m-%d')
+        date_reference += f"- {day_name} ({date.strftime('%m/%d')}) = {date_str}\n"
     
     # Build unavailable days text
     unavailable_text = ", ".join(unavailable) if unavailable else "None"
@@ -1626,45 +1628,50 @@ async def generate_plan_with_claude(special_requests: str, unavailable: list, pr
     time_pref_text = time_pref_map.get(preferred_time, preferred_time)
     
     studios_info = """
-Available studios and their keys:
-- barre3: barre3 Ballard (classes at 6:00, 9:30, 12:00, 17:45)
-- solidcore: solidcore Ballard (classes at 6:00, 7:00, 9:30, 12:00, 17:30, 18:30)
-- cycle: Cycle Sanctuary (classes at 6:00, 9:00, 12:00, 17:30)
-- pool: Ballard Public Pool / lap swim (5:30, 9:00, 12:00, 18:00)
-- greenlake: Greenlake Running Group (Saturday mornings, 7:00 or 9:00)
-- solo_run: Solo Run (any time, 3-5 miles)
+Available studios and workout types:
+- pool: Ballard Public Pool / lap swim / swimming (times: 06:00, 08:45, 11:10, 12:00, 13:30, 17:30, 19:45)
+- solo_run: Solo Run / run / running (any time you specify)
+- greenlake: Greenlake Running Group (Saturday mornings only, typically 08:00 or 09:00)
+- barre3: barre3 Ballard (times: 05:45, 06:00, 08:45, 09:30, 12:00, 16:30, 17:45)
+- solidcore: solidcore Ballard (times: 06:00, 07:00, 09:30, 12:00, 17:30, 18:30)
+- cycle: Cycle Sanctuary (times: 06:30, 09:00, 12:00, 17:30, 18:30)
 """
 
-    system_prompt = f"""You are a workout planning assistant. Generate a weekly workout plan based on the user's requests.
+    system_prompt = f"""You are a workout planning assistant. Your job is to EXACTLY follow the user's specific requests.
 
 Today is {today.strftime("%A, %B %d, %Y")}.
 
-Date reference for this week:
+Date reference for NEXT week (the week you're planning):
 {date_reference}
 
 {studios_info}
 
-User preferences:
+User constraints:
 - Unavailable days: {unavailable_text}
-- Preferred time: {time_pref_text}
+- Default time preference: {time_pref_text}
 - Include swimming: {"Yes" if include_swim else "No"}
 
-Weekly goals: 5 workouts total (1 barre3, 1 solidcore, 1 Cycle Sanctuary, 1-2 runs, optional swim)
+CRITICAL INSTRUCTIONS:
+1. PARSE THE USER'S REQUEST CAREFULLY - they will specify exact days, times, and workout types
+2. MATCH THEIR EXACT REQUESTS FIRST:
+   - "swim Monday at 12:30" → pool on Monday at 12:30
+   - "run Tuesday morning" → solo_run on Tuesday at 07:00 or 08:00
+   - "classes Wednesday between 1:30 and 5" → pick barre3/solidcore/cycle on Wednesday at 13:30 or 16:30 or 17:30
+   - "run Saturday" → greenlake on Saturday at 08:00 or 09:00
+3. ONLY add extra workouts if they haven't specified enough to reach 5 workouts
+4. Use 24-hour time format (e.g., 12:30 = 12:30, 1:30pm = 13:30)
 
-INSTRUCTIONS:
-1. Parse the user's special requests to understand which workouts they want on which days
-2. Honor their specific requests FIRST
-3. Fill in remaining days to reach 5 workouts, avoiding unavailable days
-4. Saturday should typically be Greenlake Running Group unless specified otherwise
-5. Use appropriate times based on their time preference
+You MUST respond with ONLY a JSON object (no explanation, no markdown) in this exact format:
+{{"YYYY-MM-DD": {{"studio": "studio_key", "time": "HH:MM", "class_name": "optional"}}, ...}}
 
-You MUST respond with ONLY a JSON object (no other text) in this exact format:
-{{"YYYY-MM-DD": {{"studio": "studio_key", "time": "HH:MM", "class_name": "optional"}}, "YYYY-MM-DD": {{"studio": "studio_key", "time": "HH:MM"}}}}
+Example: If user says "swim Monday 12:30, run Tuesday 7am, barre3 Wednesday 5pm, rest Thursday Friday, run Saturday":
+{{"2026-03-16": {{"studio": "pool", "time": "12:30"}}, "2026-03-17": {{"studio": "solo_run", "time": "07:00"}}, "2026-03-18": {{"studio": "barre3", "time": "17:00"}}, "2026-03-21": {{"studio": "greenlake", "time": "09:00"}}}}"""
 
-Use 24-hour time format. Use the exact studio keys: barre3, solidcore, cycle, pool, greenlake, solo_run
-Only include days that have workouts (skip rest days)."""
+    user_message = f"""Plan my workouts with these SPECIFIC requests (follow them exactly):
 
-    user_message = f"Create a workout plan with these specific requests: {special_requests}"
+{special_requests}
+
+Remember: Parse my request carefully. If I say "swim Monday at 12:30", that means pool on Monday at 12:30. If I say "run Tuesday morning", that means solo_run on Tuesday around 7-8am."""
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -1690,6 +1697,8 @@ Only include days that have workouts (skip rest days)."""
                 data = await response.json()
                 response_text = data["content"][0]["text"].strip()
                 
+                logger.info(f"Claude plan response: {response_text}")
+                
                 # Try to parse the JSON response
                 # Remove any markdown code blocks if present
                 response_text = re.sub(r'```json\s*', '', response_text)
@@ -1713,6 +1722,7 @@ Only include days that have workouts (skip rest days)."""
                     
                 except json.JSONDecodeError as e:
                     logger.error(f"Failed to parse Claude plan response: {e}")
+                    logger.error(f"Response was: {response_text}")
                     # Fall back to basic plan
                     return generate_week_plan(unavailable, preferred_time, include_swim, daily_prefs)
                     
