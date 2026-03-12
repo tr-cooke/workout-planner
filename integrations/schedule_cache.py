@@ -361,7 +361,17 @@ class ScheduleCache:
             "cycle": await self.get_cycle_schedule(force_refresh),
             "barre3": await self.get_barre3_schedule(force_refresh),
             "pool": await self.get_pool_schedule(force_refresh),
+            "greenlake": self.get_greenlake_schedule(),
         }
+    
+    def get_greenlake_schedule(self) -> List[Dict]:
+        """Get Greenlake Running Group schedule (hardcoded weekly events)."""
+        try:
+            from integrations.greenlake_schedule import get_greenlake_schedule_for_days
+            return get_greenlake_schedule_for_days(days_ahead=14)
+        except ImportError:
+            logger.warning("Greenlake schedule module not available")
+            return []
     
     def get_classes_for_date(self, studio: str, target_date: datetime) -> List[Dict]:
         """Get cached classes for a specific studio and date."""

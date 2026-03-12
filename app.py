@@ -887,28 +887,40 @@ async def build_live_schedules_modal(day_offset: int = 0) -> dict:
             
             blocks.append({"type": "divider"})
             
-            # Greenlake Running Group - show Saturday runs + any daily runs
-            is_saturday = target_date.weekday() == 5
-            greenlake_text = "*🏃 Greenlake Running Group*\n"
+            # Greenlake Running Group - show actual daily events
+            greenlake_events = cache.get_greenlake_schedule()
+            day_greenlake = [e for e in greenlake_events if e.get("date") == target_str]
             
-            if is_saturday:
-                greenlake_text += "• *8:00 AM* - Saturday Morning Group Run at Green Lake\n"
-            
-            # Add note about daily runs if not Saturday
-            if not is_saturday:
-                greenlake_text += "_Saturday mornings at Green Lake (8 AM)_\n"
-                greenlake_text += "_Check Meetup for weekday run events_"
-            
-            blocks.append({
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": greenlake_text},
-                "accessory": {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "View Meetup"},
-                    "url": "https://www.meetup.com/seattle-greenlake-running-group/events/",
-                    "action_id": "open_greenlake"
-                }
-            })
+            if day_greenlake:
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "*🏃 Greenlake Running Group*"}
+                })
+                class_text = ""
+                for event in day_greenlake:
+                    location = f" @ {event.get('location')}" if event.get('location') else ""
+                    class_text += f"• *{event['time']}* - {event['class_name']}{location}\n"
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": class_text},
+                    "accessory": {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "View Meetup"},
+                        "url": "https://www.meetup.com/seattle-greenlake-running-group/events/",
+                        "action_id": "open_greenlake"
+                    }
+                })
+            else:
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "*🏃 Greenlake Running Group*\n_No runs scheduled this day_"},
+                    "accessory": {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "View Meetup"},
+                        "url": "https://www.meetup.com/seattle-greenlake-running-group/events/",
+                        "action_id": "open_greenlake"
+                    }
+                })
             
         except Exception as e:
             logger.error(f"Error fetching schedules from cache: {e}")
@@ -975,12 +987,73 @@ async def build_live_schedules_modal(day_offset: int = 0) -> dict:
             }
         })
     
+    # Add refresh button at the bottom
+    blocks.append({"type": "divider"})
+    blocks.append({
+        "type": "actions",
+        "elements": [
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "🔄 Refresh All Schedules", "emoji": True},
+                "action_id": "refresh_schedules",
+                "style": "primary"
+            }
+        ]
+    })
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": "_Refresh fetches latest data from all studios (may take 30-60 seconds)_"}]
+    })
+    
     return {
         "type": "modal",
         "title": {"type": "plain_text", "text": "Studio Schedules"},
         "close": {"type": "plain_text", "text": "Close"},
         "blocks": blocks
     }
+
+
+@app.action("refresh_schedules")
+async def handle_refresh_schedules(ack, body, client: AsyncWebClient):
+    """Handle click on 'Refresh Schedules' button - force refresh all cached data."""
+    await ack()
+    
+    # Update the modal to show refreshing status
+    await client.views_update(
+        view_id=body["view"]["id"],
+        view={
+            "type": "modal",
+            "title": {"type": "plain_text", "text": "Studio Schedules"},
+            "close": {"type": "plain_text", "text": "Close"},
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "🔄 *Refreshing schedules...*\n\nFetching latest data from all studios. This may take 30-60 seconds."}
+                },
+                {
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": "_Please wait..._"}]
+                }
+            ]
+        }
+    )
+    
+    # Force refresh all schedules
+    if SCHEDULE_CACHE_AVAILABLE:
+        try:
+            cache = get_schedule_cache()
+            await cache.refresh_all()
+            logger.info("Schedule cache refreshed successfully")
+        except Exception as e:
+            logger.error(f"Error refreshing schedules: {e}")
+    
+    # Rebuild the modal with fresh data
+    live_modal = await build_live_schedules_modal(day_offset=0)
+    
+    await client.views_update(
+        view_id=body["view"]["id"],
+        view=live_modal
+    )
 
 
 @app.action("check_weather")
@@ -1630,8 +1703,14 @@ async def generate_plan_with_claude(special_requests: str, unavailable: list, pr
     studios_info = """
 Available studios and workout types:
 - pool: Ballard Public Pool / lap swim / swimming (times: 06:00, 08:45, 11:10, 12:00, 13:30, 17:30, 19:45)
-- solo_run: Solo Run / run / running (any time you specify)
-- greenlake: Greenlake Running Group (Saturday mornings only, typically 08:00 or 09:00)
+- solo_run: Solo Run / run / running (any time you specify, flexible)
+- greenlake: Greenlake Running Group (Meetup group runs):
+  * Monday: 05:30 (morning track), 18:30 (evening track)
+  * Tuesday: 18:30 (evening run)
+  * Wednesday: 05:30 (wake up run), 17:30 (trailhead)
+  * Thursday: 18:30 (casual run)
+  * Friday: 06:00 (Lake Union run)
+  * Saturday: 07:00 (rise and shine), 09:00 (mid-morning)
 - barre3: barre3 Ballard (times: 05:45, 06:00, 08:45, 09:30, 12:00, 16:30, 17:45)
 - solidcore: solidcore Ballard (times: 06:00, 07:00, 09:30, 12:00, 17:30, 18:30)
 - cycle: Cycle Sanctuary (times: 06:30, 09:00, 12:00, 17:30, 18:30)
