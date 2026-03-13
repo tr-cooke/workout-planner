@@ -1220,12 +1220,22 @@ async def handle_plan_week_submit(ack, body, client: AsyncWebClient, view):
     values = view["state"]["values"]
     has_daily_times = view.get("private_metadata") == "daily_times"
     
+    logger.info(f"=== PLAN WEEK SUBMIT ===")
+    logger.info(f"User: {user_id}")
+    logger.info(f"All values keys: {list(values.keys())}")
+    
     unavailable_days = values.get("unavailable_days", {}).get("days", {}).get("selected_options", [])
     unavailable = [opt["value"] for opt in unavailable_days] if unavailable_days else []
     
     preferred_time = values["preferred_times"]["time"]["selected_option"]["value"]
     include_swim = values["swim_week"]["swim"]["selected_option"]["value"] == "yes"
     special_requests = values.get("special_requests", {}).get("requests", {}).get("value", "")
+    
+    logger.info(f"Unavailable: {unavailable}")
+    logger.info(f"Preferred time: {preferred_time}")
+    logger.info(f"Include swim: {include_swim}")
+    logger.info(f"Special requests: '{special_requests}'")
+    logger.info(f"ANTHROPIC_API_KEY set: {bool(ANTHROPIC_API_KEY)}")
     
     # Extract daily time preferences if present
     daily_prefs = {}
@@ -1677,6 +1687,12 @@ Keep responses concise and friendly. Confirm what changes you're making."""
 async def generate_plan_with_claude(special_requests: str, unavailable: list, preferred_time: str, include_swim: bool, daily_prefs: dict = None) -> dict:
     """Use Claude to generate a workout plan based on special requests."""
     
+    logger.info(f"=== CLAUDE PLAN GENERATION ===")
+    logger.info(f"Special requests: {special_requests}")
+    logger.info(f"Unavailable: {unavailable}")
+    logger.info(f"Preferred time: {preferred_time}")
+    logger.info(f"Include swim: {include_swim}")
+    
     week_dates = get_week_dates(planning_mode=True)
     today = datetime.now(SEATTLE_TZ)
     
@@ -1686,6 +1702,8 @@ async def generate_plan_with_claude(special_requests: str, unavailable: list, pr
         day_name = date.strftime('%A')
         date_str = date.strftime('%Y-%m-%d')
         date_reference += f"- {day_name} ({date.strftime('%m/%d')}) = {date_str}\n"
+    
+    logger.info(f"Date reference:\n{date_reference}")
     
     # Build unavailable days text
     unavailable_text = ", ".join(unavailable) if unavailable else "None"
@@ -1716,11 +1734,11 @@ Available studios and workout types:
 - cycle: Cycle Sanctuary (times: 06:30, 09:00, 12:00, 17:30, 18:30)
 """
 
-    system_prompt = f"""You are a workout planning assistant. Your job is to EXACTLY follow the user's specific requests.
+    system_prompt = f"""You are a workout planning assistant. Your ONLY job is to convert the user's specific requests into a JSON workout plan.
 
 Today is {today.strftime("%A, %B %d, %Y")}.
 
-Date reference for NEXT week (the week you're planning):
+Date reference for the planning week:
 {date_reference}
 
 {studios_info}
@@ -1730,27 +1748,28 @@ User constraints:
 - Default time preference: {time_pref_text}
 - Include swimming: {"Yes" if include_swim else "No"}
 
-CRITICAL INSTRUCTIONS:
-1. PARSE THE USER'S REQUEST CAREFULLY - they will specify exact days, times, and workout types
-2. MATCH THEIR EXACT REQUESTS FIRST:
-   - "swim Monday at 12:30" → pool on Monday at 12:30
-   - "run Tuesday morning" → solo_run on Tuesday at 07:00 or 08:00
-   - "classes Wednesday between 1:30 and 5" → pick barre3/solidcore/cycle on Wednesday at 13:30 or 16:30 or 17:30
-   - "run Saturday" → greenlake on Saturday at 08:00 or 09:00
-3. ONLY add extra workouts if they haven't specified enough to reach 5 workouts
-4. Use 24-hour time format (e.g., 12:30 = 12:30, 1:30pm = 13:30)
+CRITICAL - YOU MUST FOLLOW THESE RULES:
+1. READ THE USER'S REQUEST WORD BY WORD
+2. For EACH workout they mention, create an entry:
+   - "swim Monday 12:30" → {{"2026-03-16": {{"studio": "pool", "time": "12:30"}}}}
+   - "run Tuesday morning" → {{"2026-03-17": {{"studio": "solo_run", "time": "07:00"}}}}
+   - "class Wednesday between 1:30 and 5" → {{"2026-03-18": {{"studio": "barre3", "time": "16:30"}}}}
+   - "Thursday any time" → {{"2026-03-19": {{"studio": "solidcore", "time": "12:00"}}}}
+   - "run Saturday" → {{"2026-03-21": {{"studio": "greenlake", "time": "09:00"}}}}
+3. DO NOT add workouts they didn't ask for
+4. DO NOT ignore workouts they DID ask for
+5. Use 24-hour time (12:30 stays 12:30, 1:30pm becomes 13:30, 5pm becomes 17:00)
 
-You MUST respond with ONLY a JSON object (no explanation, no markdown) in this exact format:
-{{"YYYY-MM-DD": {{"studio": "studio_key", "time": "HH:MM", "class_name": "optional"}}, ...}}
+OUTPUT FORMAT - ONLY output valid JSON, nothing else:
+{{"YYYY-MM-DD": {{"studio": "key", "time": "HH:MM"}}, "YYYY-MM-DD": {{"studio": "key", "time": "HH:MM"}}}}"""
 
-Example: If user says "swim Monday 12:30, run Tuesday 7am, barre3 Wednesday 5pm, rest Thursday Friday, run Saturday":
-{{"2026-03-16": {{"studio": "pool", "time": "12:30"}}, "2026-03-17": {{"studio": "solo_run", "time": "07:00"}}, "2026-03-18": {{"studio": "barre3", "time": "17:00"}}, "2026-03-21": {{"studio": "greenlake", "time": "09:00"}}}}"""
+    user_message = f"""Convert this EXACTLY to a workout plan JSON:
 
-    user_message = f"""Plan my workouts with these SPECIFIC requests (follow them exactly):
+"{special_requests}"
 
-{special_requests}
+Map each request to the correct date from the date reference. Output ONLY the JSON."""
 
-Remember: Parse my request carefully. If I say "swim Monday at 12:30", that means pool on Monday at 12:30. If I say "run Tuesday morning", that means solo_run on Tuesday around 7-8am."""
+    logger.info(f"User message to Claude: {user_message}")
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -1768,23 +1787,30 @@ Remember: Parse my request carefully. If I say "swim Monday at 12:30", that mean
                     "messages": [{"role": "user", "content": user_message}]
                 }
             ) as response:
+                logger.info(f"Claude API response status: {response.status}")
+                
                 if response.status != 200:
-                    logger.error(f"Claude API error: {response.status}")
+                    error_text = await response.text()
+                    logger.error(f"Claude API error: {response.status} - {error_text}")
                     # Fall back to basic plan
                     return generate_week_plan(unavailable, preferred_time, include_swim, daily_prefs)
                 
                 data = await response.json()
                 response_text = data["content"][0]["text"].strip()
                 
-                logger.info(f"Claude plan response: {response_text}")
+                logger.info(f"Claude raw response: {response_text}")
                 
                 # Try to parse the JSON response
                 # Remove any markdown code blocks if present
                 response_text = re.sub(r'```json\s*', '', response_text)
                 response_text = re.sub(r'```\s*', '', response_text)
+                response_text = response_text.strip()
+                
+                logger.info(f"Claude cleaned response: {response_text}")
                 
                 try:
                     plan_data = json.loads(response_text)
+                    logger.info(f"Parsed plan data: {plan_data}")
                     
                     # Convert to the expected format
                     plan = {}
@@ -1797,6 +1823,7 @@ Remember: Parse my request carefully. If I say "swim Monday at 12:30", that mean
                                 "notes": workout.get("notes", "")
                             }
                     
+                    logger.info(f"Final plan: {plan}")
                     return plan
                     
                 except json.JSONDecodeError as e:
