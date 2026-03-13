@@ -168,8 +168,36 @@ def save_user_data():
     except Exception as e:
         logger.error(f"Error saving user data: {e}")
 
+# Token storage file
+TOKEN_FILE = "/app/data/google_tokens.json"
+
+def load_google_tokens() -> dict:
+    """Load Google OAuth tokens from JSON file."""
+    try:
+        if os.path.exists(TOKEN_FILE):
+            with open(TOKEN_FILE, 'r') as f:
+                tokens = json.load(f)
+                logger.info(f"Loaded Google tokens for {len(tokens)} users")
+                return tokens
+    except Exception as e:
+        logger.error(f"Error loading Google tokens: {e}")
+    return {}
+
+def save_google_tokens():
+    """Save Google OAuth tokens to JSON file."""
+    try:
+        os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
+        with open(TOKEN_FILE, 'w') as f:
+            json.dump(user_google_tokens, f, indent=2)
+        logger.debug("Google tokens saved successfully")
+    except Exception as e:
+        logger.error(f"Error saving Google tokens: {e}")
+
 # Store for user preferences and scheduled workouts
 user_data = load_user_data()
+
+# Load persisted Google tokens
+user_google_tokens.update(load_google_tokens())
 
 
 def get_week_dates(start_date: Optional[datetime] = None, planning_mode: bool = False) -> list:
@@ -2182,6 +2210,7 @@ async def get_valid_token(user_id: str) -> Optional[str]:
             tokens["access_token"] = new_tokens["access_token"]
             tokens["expires_at"] = datetime.now().timestamp() + new_tokens.get("expires_in", 3600)
             user_google_tokens[user_id] = tokens
+            save_google_tokens()  # Persist refreshed tokens
         else:
             logger.error(f"Failed to refresh token: {new_tokens}")
             return None
@@ -2443,6 +2472,9 @@ async def handle_oauth_callback(request: web.Request) -> web.Response:
         "refresh_token": tokens.get("refresh_token"),
         "expires_at": datetime.now().timestamp() + tokens.get("expires_in", 3600)
     }
+    
+    # Persist tokens to file
+    save_google_tokens()
     
     logger.info(f"Successfully connected Google Calendar for user {user_id}")
     
