@@ -747,13 +747,56 @@ async def handle_view_schedules(ack, body, client: AsyncWebClient):
     """Handle click on 'View Schedules' button."""
     await ack()
     
-    # Build the live schedules modal for today (default)
-    live_modal = await build_live_schedules_modal(day_offset=0)
+    # Open modal immediately with loading state (before trigger_id expires)
+    loading_modal = {
+        "type": "modal",
+        "title": {"type": "plain_text", "text": "Studio Schedules"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "🔄 *Loading schedules...*\n\nFetching class data from studios."}
+            }
+        ]
+    }
     
-    await client.views_open(
+    # Open the modal immediately
+    result = await client.views_open(
         trigger_id=body["trigger_id"],
-        view=live_modal
+        view=loading_modal
     )
+    
+    view_id = result["view"]["id"]
+    
+    # Now build the actual content (this can take time)
+    try:
+        live_modal = await build_live_schedules_modal(day_offset=0)
+        
+        # Update the modal with actual content
+        await client.views_update(
+            view_id=view_id,
+            view=live_modal
+        )
+    except Exception as e:
+        logger.error(f"Error building schedules modal: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # Update with error message
+        await client.views_update(
+            view_id=view_id,
+            view={
+                "type": "modal",
+                "title": {"type": "plain_text", "text": "Studio Schedules"},
+                "close": {"type": "plain_text", "text": "Close"},
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": "❌ *Error loading schedules*\n\nPlease try again later."}
+                    }
+                ]
+            }
+        )
 
 
 @app.action("schedule_day_select")
