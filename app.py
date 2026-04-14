@@ -1574,7 +1574,7 @@ async def chat_with_claude(user_message: str, current_schedule: dict, user_id: s
     studios_info = """
 Available studios and their keys:
 - barre3: barre3 Ballard (classes at 6:00, 9:30, 12:00, 17:45)
-- solidcore: solidcore Ballard (classes at 6:00, 7:00, 9:30, 12:00, 17:30, 18:30)
+- solidcore: solidcore Ballard (classes at 6:10, 7:10, 9:30, 12:00, 17:30, 18:30)
 - cycle: Cycle Sanctuary (classes at 6:00, 9:00, 12:00, 17:30)
 - pool: Ballard Public Pool / lap swim (5:30, 9:00, 12:00, 18:00)
 - greenlake: Greenlake Running Group (Saturday mornings, 7:00 or 9:00)
@@ -1746,20 +1746,83 @@ async def generate_plan_with_claude(special_requests: str, unavailable: list, pr
     }
     time_pref_text = time_pref_map.get(preferred_time, preferred_time)
     
-    studios_info = """
-Available studios and workout types:
-- pool: Ballard Public Pool / lap swim / swimming (times: 06:00, 08:45, 11:10, 12:00, 13:30, 17:30, 19:45)
-- solo_run: Solo Run / run / running (any time you specify, flexible)
-- greenlake: Greenlake Running Group (Meetup group runs):
-  * Monday: 05:30 (morning track), 18:30 (evening track)
-  * Tuesday: 18:30 (evening run)
-  * Wednesday: 05:30 (wake up run), 17:30 (trailhead)
-  * Thursday: 18:30 (casual run)
-  * Friday: 06:00 (Lake Union run)
-  * Saturday: 07:00 (rise and shine), 09:00 (mid-morning)
-- barre3: barre3 Ballard (times: 05:45, 06:00, 08:45, 09:30, 12:00, 16:30, 17:45)
-- solidcore: solidcore Ballard (times: 06:00, 07:00, 09:30, 12:00, 17:30, 18:30)
-- cycle: Cycle Sanctuary (times: 06:30, 09:00, 12:00, 17:30, 18:30)
+    # Fetch live schedules for the planning week
+    live_schedule_info = ""
+    if SCHEDULE_CACHE_AVAILABLE:
+        try:
+            cache = get_schedule_cache()
+            
+            for date in week_dates:
+                date_str = date.strftime('%Y-%m-%d')
+                day_name = date.strftime('%A %m/%d')
+                live_schedule_info += f"\n{day_name}:\n"
+                
+                # solidcore
+                solidcore_classes = await cache.get_solidcore_schedule()
+                day_solidcore = [c for c in solidcore_classes if c.get("date") == date_str]
+                if day_solidcore:
+                    live_schedule_info += "  solidcore: "
+                    live_schedule_info += ", ".join([f"{c['time']} {c.get('class_name', 'Signature50')}" for c in day_solidcore[:5]])
+                    live_schedule_info += "\n"
+                
+                # barre3
+                barre3_classes = await cache.get_barre3_schedule()
+                day_barre3 = [c for c in barre3_classes if c.get("date") == date_str]
+                if day_barre3:
+                    live_schedule_info += "  barre3: "
+                    live_schedule_info += ", ".join([f"{c['time']} {c.get('class_name', 'Signature')}" for c in day_barre3[:5]])
+                    live_schedule_info += "\n"
+                
+                # cycle
+                cycle_classes = await cache.get_cycle_schedule()
+                day_cycle = [c for c in cycle_classes if c.get("date") == date_str]
+                if day_cycle:
+                    live_schedule_info += "  cycle: "
+                    live_schedule_info += ", ".join([f"{c['time']} {c.get('class_name', 'Cycle')}" for c in day_cycle[:5]])
+                    live_schedule_info += "\n"
+                
+                # pool
+                pool_classes = await cache.get_pool_schedule()
+                day_pool = [c for c in pool_classes if c.get("date") == date_str]
+                if day_pool:
+                    live_schedule_info += "  pool: "
+                    live_schedule_info += ", ".join([f"{c['time']} {c.get('class_name', 'Lap Swim')}" for c in day_pool[:5]])
+                    live_schedule_info += "\n"
+                
+                # greenlake
+                greenlake_events = cache.get_greenlake_schedule()
+                day_greenlake = [e for e in greenlake_events if e.get("date") == date_str]
+                if day_greenlake:
+                    live_schedule_info += "  greenlake: "
+                    live_schedule_info += ", ".join([f"{e['time']} {e.get('class_name', 'Group Run')}" for e in day_greenlake])
+                    live_schedule_info += "\n"
+                    
+        except Exception as e:
+            logger.error(f"Error fetching live schedules: {e}")
+            live_schedule_info = ""
+    
+    # Fallback static info if live schedules not available
+    if not live_schedule_info:
+        live_schedule_info = """
+Note: Live schedules unavailable. Use these typical times:
+- solidcore: 06:10, 07:10, 09:30, 12:00, 17:30, 18:30
+- barre3: 05:45, 06:00, 08:45, 09:30, 12:00, 16:30, 17:45
+- cycle: 06:30, 09:00, 12:00, 17:30, 18:30
+- pool: 06:00, 08:45, 11:10, 12:00, 13:30, 17:30, 19:45
+- greenlake: Mon 05:30/18:30, Tue 18:30, Wed 05:30/17:30, Thu 18:30, Fri 06:00, Sat 07:00/09:00
+"""
+    
+    studios_info = f"""
+Available studios:
+- pool: Ballard Public Pool / lap swim / swimming
+- solo_run: Solo Run (any time, flexible)
+- greenlake: Greenlake Running Group
+- barre3: barre3 Ballard
+- solidcore: solidcore Ballard  
+- cycle: Cycle Sanctuary
+
+LIVE CLASS SCHEDULES FOR THIS WEEK:
+{live_schedule_info}
 """
 
     system_prompt = f"""You are a workout planning assistant. Your ONLY job is to convert the user's specific requests into a JSON workout plan.
@@ -1778,24 +1841,24 @@ User constraints:
 
 CRITICAL - YOU MUST FOLLOW THESE RULES:
 1. READ THE USER'S REQUEST WORD BY WORD
-2. For EACH workout they mention, create an entry:
-   - "swim Monday 12:30" → {{"2026-03-16": {{"studio": "pool", "time": "12:30"}}}}
-   - "run Tuesday morning" → {{"2026-03-17": {{"studio": "solo_run", "time": "07:00"}}}}
-   - "class Wednesday between 1:30 and 5" → {{"2026-03-18": {{"studio": "barre3", "time": "16:30"}}}}
-   - "Thursday any time" → {{"2026-03-19": {{"studio": "solidcore", "time": "12:00"}}}}
-   - "run Saturday" → {{"2026-03-21": {{"studio": "greenlake", "time": "09:00"}}}}
-3. DO NOT add workouts they didn't ask for
-4. DO NOT ignore workouts they DID ask for
-5. Use 24-hour time (12:30 stays 12:30, 1:30pm becomes 13:30, 5pm becomes 17:00)
+2. Use the LIVE CLASS SCHEDULES above to pick REAL class times
+3. For EACH workout they mention, create an entry with the actual class time and name:
+   - "swim Monday" → find a pool time from Monday's schedule
+   - "barre3 Tuesday morning" → find a morning barre3 class from Tuesday's schedule
+   - "solidcore Wednesday" → pick a solidcore class from Wednesday's schedule and include the class name
+4. Include the class_name field with the actual class name (e.g., "Signature50: Full Body", "barre3 Signature 60")
+5. DO NOT add workouts they didn't ask for
+6. DO NOT ignore workouts they DID ask for
+7. Use 24-hour time format
 
-OUTPUT FORMAT - ONLY output valid JSON, nothing else:
-{{"YYYY-MM-DD": {{"studio": "key", "time": "HH:MM"}}, "YYYY-MM-DD": {{"studio": "key", "time": "HH:MM"}}}}"""
+OUTPUT FORMAT - ONLY output valid JSON:
+{{"YYYY-MM-DD": {{"studio": "key", "time": "HH:MM", "class_name": "actual class name"}}, ...}}"""
 
     user_message = f"""Convert this EXACTLY to a workout plan JSON:
 
 "{special_requests}"
 
-Map each request to the correct date from the date reference. Output ONLY the JSON."""
+Use the LIVE CLASS SCHEDULES to pick real class times. Include the class_name. Output ONLY the JSON."""
 
     logger.info(f"User message to Claude: {user_message}")
 
@@ -1990,6 +2053,28 @@ def generate_week_plan(unavailable: list, preferred_time: str, include_swim: boo
     return plan
 
 
+def format_time_12hr(time_24: str) -> str:
+    """Convert 24-hour time string to 12-hour format with AM/PM.
+    
+    Args:
+        time_24: Time in HH:MM format (e.g., "06:10", "17:30")
+    
+    Returns:
+        Time in 12-hour format (e.g., "6:10 AM", "5:30 PM")
+    """
+    try:
+        hour, minute = map(int, time_24.split(":"))
+        period = "AM" if hour < 12 else "PM"
+        hour_12 = hour % 12
+        if hour_12 == 0:
+            hour_12 = 12
+        if minute == 0:
+            return f"{hour_12} {period}"
+        return f"{hour_12}:{minute:02d} {period}"
+    except:
+        return time_24  # Return original if parsing fails
+
+
 def format_plan_message(plan: dict) -> str:
     """Format a plan dictionary into a readable message."""
     week_dates = get_week_dates(planning_mode=True)
@@ -2003,10 +2088,18 @@ def format_plan_message(plan: dict) -> str:
         if workout:
             studio = workout["studio"]
             time = workout["time"]
+            time_display = format_time_12hr(time)
+            class_name = workout.get("class_name", "")
             notes = workout.get("notes", "")
             emoji = STUDIOS.get(studio, {}).get("emoji", "✨")
             name = STUDIOS.get(studio, {}).get("name", studio)
-            line = f"*{day_name}*: {emoji} {name} at {time}"
+            
+            # Build the line with class name if available
+            if class_name:
+                line = f"*{day_name}*: {emoji} {name} at {time_display}\n  _{class_name}_"
+            else:
+                line = f"*{day_name}*: {emoji} {name} at {time_display}"
+            
             if notes:
                 line += f"\n  _{notes}_"
         else:
